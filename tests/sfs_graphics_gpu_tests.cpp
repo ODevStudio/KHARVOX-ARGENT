@@ -19,11 +19,17 @@
 #include <atomic>
 #include <fstream>
 #include <future>
+#include <algorithm>
+#include <chrono>
 #include "../src/openxr/GameImageLifetime.h"
 #ifdef KHARVOX_SFS_RING_RUNTIME
 static PFN_vkGetDeviceProcAddr driverResolver{};
 static VkResult retirementFailure=VK_SUCCESS;
-static unsigned parameterMaps{};
+static VkResult parameterMapFailure=VK_SUCCESS;
+static unsigned parameterMaps{},parameterUnmaps{},parameterFrees{};
+static VkDeviceMemory parameterMemory{};
+static void* parameterData{};
+static bool parameterFreedWhileMapped{};
 // Exercise the real SFS hooks without requiring a ray-tracing-capable test GPU.
 // Only the synthetic ray commands are consumed here; graphics/compute still
 // execute on the driver and are checked by the image/compute readbacks below.
@@ -59,8 +65,19 @@ static VKAPI_ATTR VkResult VKAPI_CALL testRetirement(VkDevice device){
  return reinterpret_cast<PFN_vkDeviceWaitIdle>(driverResolver(device,"vkDeviceWaitIdle"))(device);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL testMap(VkDevice device,VkDeviceMemory memory,VkDeviceSize offset,VkDeviceSize size,VkMemoryMapFlags flags,void** data){
- ++parameterMaps;
- return reinterpret_cast<PFN_vkMapMemory>(driverResolver(device,"vkMapMemory"))(device,memory,offset,size,flags,data);
+ const bool parameters=size==sizeof(argent::sfs::EyeUniforms);
+ if(parameters){++parameterMaps;parameterMemory=memory;if(parameterMapFailure!=VK_SUCCESS)return parameterMapFailure;}
+ const auto result=reinterpret_cast<PFN_vkMapMemory>(driverResolver(device,"vkMapMemory"))(device,memory,offset,size,flags,data);
+ if(parameters&&result==VK_SUCCESS)parameterData=*data;
+ return result;
+}
+static VKAPI_ATTR void VKAPI_CALL testUnmap(VkDevice device,VkDeviceMemory memory){
+ if(memory==parameterMemory){++parameterUnmaps;parameterData=nullptr;}
+ reinterpret_cast<PFN_vkUnmapMemory>(driverResolver(device,"vkUnmapMemory"))(device,memory);
+}
+static VKAPI_ATTR void VKAPI_CALL testFreeMemory(VkDevice device,VkDeviceMemory memory,const VkAllocationCallbacks* allocator){
+ if(memory==parameterMemory){++parameterFrees;parameterFreedWhileMapped|=parameterData!=nullptr;}
+ reinterpret_cast<PFN_vkFreeMemory>(driverResolver(device,"vkFreeMemory"))(device,memory,allocator);
 }
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL testResolver(VkDevice device,const char* name){
  if(!std::strcmp(name,"vkCmdBindPipeline"))return reinterpret_cast<PFN_vkVoidFunction>(testBindPipeline);
@@ -68,6 +85,8 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL testResolver(VkDevice device,con
  if(!std::strcmp(name,"vkCmdPushConstants"))return reinterpret_cast<PFN_vkVoidFunction>(testPush);
  if(!std::strcmp(name,"vkDeviceWaitIdle"))return reinterpret_cast<PFN_vkVoidFunction>(testRetirement);
  if(!std::strcmp(name,"vkMapMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testMap);
+ if(!std::strcmp(name,"vkUnmapMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testUnmap);
+ if(!std::strcmp(name,"vkFreeMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testFreeMemory);
  if(!std::strcmp(name,"vkCreateRenderPass"))return reinterpret_cast<PFN_vkVoidFunction>(testCreatePass);
  return driverResolver(device,name);
 }
@@ -79,6 +98,8 @@ static unsigned performanceGpuCommands{},performanceGpuRegions{},performanceGpuF
 namespace argent {void log(const std::string& message){performanceGpuCommands+=message.find("PERF_GPU_COMMAND")!=std::string::npos;performanceGpuRegions+=message.find("PERF_GPU_PASS")!=std::string::npos;performanceGpuFailures+=message.find("PERF_GPU_UNAVAILABLE")!=std::string::npos;std::cout<<message<<std::endl;}}
 #endif
 int main(int argc,char** argv){try{
+ const bool benchmark=argc==4&&std::string(argv[3])=="benchmark";
+ if(benchmark)SetEnvironmentVariableA("ARGENT_SFS_PROFILE_TIMING","1");
  const bool captureTest=argc==4&&std::string(argv[3])=="capture";
  if(captureTest){auto folder=std::filesystem::temp_directory_path()/("argent-sky-hook-test-"+std::to_string(GetCurrentProcessId()));SetEnvironmentVariableW(L"ARGENT_CAPTURE_DIRECTORY",folder.c_str());SetEnvironmentVariableA("ARGENT_WATER_GPU_CAPTURE","1");}
  const bool performanceTest=argc==4&&std::string(argv[3])=="perf";if(performanceTest)SetEnvironmentVariableA("ARGENT_PERFORMANCE_DIAGNOSTICS","1");
@@ -127,7 +148,7 @@ int main(int argc,char** argv){try{
  ok(deviceResult);
 #ifdef KHARVOX_SFS_RING_RUNTIME
  VkPhysicalDeviceMemoryProperties runtimeMemory{};vkGetPhysicalDeviceMemoryProperties(physical,&runtimeMemory);
- check(argc==3||performanceTest||captureTest,"Need vertex and fragment fixtures");
+ check(argc==3||performanceTest||captureTest||benchmark,"Need vertex and fragment fixtures");
  auto readShader=[](const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"Missing shader fixture");std::vector<uint32_t> words(size_t(f.tellg())/4);f.seekg(0);f.read(reinterpret_cast<char*>(words.data()),words.size()*4);return words;};
  auto vertexWords=readShader(argv[1]),fragmentWords=readShader(argv[2]);
  argent::sfs::Configuration configuration{};
@@ -138,7 +159,12 @@ int main(int argc,char** argv){try{
 #endif
  driverResolver=vkGetDeviceProcAddr;
  testDevice=device;
+ parameterMapFailure=VK_ERROR_MEMORY_MAP_FAILED;
+ check(!argent::sfs::initialize(device,physical,testResolver,runtimeMemory,configuration),"SFS accepted a failed parameter map");
+ check(parameterFrees==1&&parameterUnmaps==0&&!parameterData,"Failed parameter mapping leaked memory or unmapped invalid storage");
+ parameterMapFailure=VK_SUCCESS;
  check(argent::sfs::initialize(device,physical,testResolver,runtimeMemory,configuration),"SFS init failed");
+ check(parameterMaps==2&&parameterUnmaps==0&&parameterData,"SFS did not retain its parameter mapping");
  if(performanceTest){VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(physical,&props);argent::sfs::configurePerformanceGpu(device,props.limits.timestampPeriod,uint32_t(families.size()),families.data());}
  auto resolve=[&](const char* name){return argent::sfs::wrapProc(device,name,vkGetDeviceProcAddr(device,name));};
  if(captureTest){
@@ -335,7 +361,9 @@ int main(int argc,char** argv){try{
  VkPhysicalDeviceProperties timingProperties{};vkGetPhysicalDeviceProperties(physical,&timingProperties);
  kharvox::CopyGpuTiming timing;timing.initialize(device,vkGetDeviceProcAddr,timingProperties.limits.timestampPeriod,families[family].timestampValidBits);
  check(timing.pool!=VK_NULL_HANDLE,"GPU timestamp initialization failed");
- for(uint32_t frame=0;frame<20;++frame){
+ const uint32_t frameCount=benchmark?240:20;
+ std::array<std::vector<double>,2> uniformTimes;
+ for(uint32_t frame=0;frame<frameCount;++frame){
 #ifdef KHARVOX_SFS_RING_RUNTIME
   if(frame==10){
    // The preceding fence retired GPU work. Replace warmed resources, including
@@ -369,7 +397,7 @@ int main(int argc,char** argv){try{
   uniforms.clipFromCenter[0][12]=-.5f;uniforms.clipFromCenter[1][12]=.5f;
   // Exercise cinematic forward/backward eye offsets without changing expected
   // pixels: normalize projected XY while preserving the native clip depth.
-  if(frame>=10)for(int e=0;e<2;++e){const float w=frame%2?1.25f:.75f;
+  if(frame>=(benchmark?120u:10u))for(int e=0;e<2;++e){const float w=frame%2?1.25f:.75f;
     uniforms.clipFromCenter[e][0]=uniforms.clipFromCenter[e][5]=w;
     uniforms.clipFromCenter[e][12]*=w;uniforms.eyeTranslation[e][3]=w-1;
   }
@@ -377,15 +405,19 @@ int main(int argc,char** argv){try{
 #endif
   argent::sfs::prepare(device,pose,uniforms);
   if(frame==0){
-   const auto mapsBefore=parameterMaps;
+   std::array<unsigned char,sizeof(argent::sfs::EyeUniforms)> before{};std::memcpy(before.data(),parameterData,before.size());
    retirementFailure=VK_ERROR_DEVICE_LOST;
    check(argent::sfs::beginFrame(device,chain,index)==VK_ERROR_DEVICE_LOST,"Retirement error was swallowed or aborted");
-   check(parameterMaps==mapsBefore,"Failed retirement must not write frame parameters");
+   check(std::memcmp(parameterData,before.data(),before.size())==0,"Failed retirement changed mapped frame parameters");
    argent::sfs::StereoFrame rejected;
    check(!argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,rejected),"Failed retirement published a frame");
    retirementFailure=VK_SUCCESS;
   }
+  const auto uniformStart=std::chrono::steady_clock::now();
   ok(argent::sfs::beginFrame(device,chain,index));
+  if(benchmark&&frame%120>=20)uniformTimes[frame/120].push_back(std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-uniformStart).count());
+  check(std::memcmp(parameterData,&uniforms,sizeof(uniforms))==0,"Published frame differs from mapped parameter bytes");
+  check(parameterMaps==2&&parameterUnmaps==0,"Frame publication remapped parameter memory");
   if(performanceTest)argent::perf::mode.store(2);
   ok(vkResetCommandBuffer(command,0));ok(vkBeginCommandBuffer(command,&begin));timing.begin(command);
   vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,nullptr);
@@ -488,6 +520,12 @@ int main(int argc,char** argv){try{
 #endif
   vkUnmapMemory(device,readback);
  }
+ if(benchmark)for(size_t group=0;group<uniformTimes.size();++group){
+  auto samples=uniformTimes[group];std::sort(samples.begin(),samples.end());
+  double sum{};for(const auto sample:samples)sum+=sample;
+  std::cout<<"SFS uniform publication benchmark payload="<<(group?"changed":"unchanged")<<" samples="<<samples.size()
+   <<" meanUs="<<sum/samples.size()<<" p50Us="<<samples[samples.size()/2]<<" p95Us="<<samples[samples.size()*95/100]<<'\n';
+ }
  // A reset subrange must reset both physical slots. CPU NOT_READY leaves
  // result bytes untouched and still reports zero availability for each query.
  ok(vkResetCommandBuffer(command,0));VkCommandBufferBeginInfo resetBegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ok(vkBeginCommandBuffer(command,&resetBegin));vkCmdResetQueryPool(command,occlusion,1,2);ok(vkEndCommandBuffer(command));
@@ -527,10 +565,11 @@ int main(int argc,char** argv){try{
  argent::shutdownXR(device);
 #endif
  argent::sfs::shutdown(device);
+ check(parameterUnmaps==1&&parameterFrees==2&&!parameterData&&!parameterFreedWhileMapped,"Parameter mapping shutdown or failure cleanup is incorrect");
 #endif
 #ifndef ARGENT_TEST_OPENXR
  if(performanceTest)check(performanceGpuCommands>=1&&performanceGpuRegions>=2&&performanceGpuFailures==0,"Real GPU diagnostic readback/regions failed");
 #endif
  vkDestroyDevice(device,nullptr);vkDestroyInstance(instance,nullptr);FreeLibrary(loader);
- std::cout<<"Source ring: 20 frames, both eye readbacks, acquire signals, consumed/unconsumed waits, exhaustion and recreation passed\n";return 0;
+ std::cout<<"Source ring: "<<frameCount<<" frames, both eye readbacks, acquire signals, consumed/unconsumed waits, exhaustion and recreation passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

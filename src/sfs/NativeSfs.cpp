@@ -118,7 +118,7 @@ struct State : std::enable_shared_from_this<State> {
     std::unordered_map<VkQueryPool,VkQueryType> queryPools;
     std::atomic<uint64_t> stereoTimestamps{};
     std::atomic<uint64_t> stereoOcclusion{};
-    VkBuffer params{};VkDeviceMemory paramsMemory{};
+    VkBuffer params{};VkDeviceMemory paramsMemory{};void* paramsMapped{};
     EyeUniforms pendingUniforms{};
     FramePose pendingPose{},renderPose{};
     std::unordered_map<VkImage,FramePose> imagePoses;
@@ -778,11 +778,11 @@ bool initialize(VkDevice d,VkPhysicalDevice physical,PFN_vkGetDeviceProcAddr gdp
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=sizeof(EyeUniforms);bi.usage=VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;if(FN(vkCreateBuffer)(d,&bi,nullptr,&s->params)!=VK_SUCCESS)return false;
         VkMemoryRequirements r{};FN(vkGetBufferMemoryRequirements)(d,s->params,&r);uint32_t index=UINT32_MAX;for(uint32_t j=0;j<memory.memoryTypeCount;++j)if((r.memoryTypeBits&(1u<<j))&&(memory.memoryTypes[j].propertyFlags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){index=j;break;}
         if(index==UINT32_MAX)throw std::runtime_error("No coherent SFS parameter memory");VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=r.size;ai.memoryTypeIndex=index;if(FN(vkAllocateMemory)(d,&ai,nullptr,&s->paramsMemory)!=VK_SUCCESS)throw std::runtime_error("SFS parameter allocation failed");if(FN(vkBindBufferMemory)(d,s->params,s->paramsMemory,0)!=VK_SUCCESS)throw std::runtime_error("SFS parameter bind failed");
-        void* mapped{};if(FN(vkMapMemory)(d,s->paramsMemory,0,sizeof(EyeUniforms),0,&mapped)!=VK_SUCCESS)throw std::runtime_error("SFS parameter map failed");EyeUniforms initial{{identity(),identity()},{}};std::memcpy(mapped,&initial,sizeof(initial));FN(vkUnmapMemory)(d,s->paramsMemory);
+        void* mapped{};if(FN(vkMapMemory)(d,s->paramsMemory,0,sizeof(EyeUniforms),0,&mapped)!=VK_SUCCESS)throw std::runtime_error("SFS parameter map failed");s->paramsMapped=mapped;const EyeUniforms initial{{identity(),identity()},{}};std::memcpy(s->paramsMapped,&initial,sizeof(initial));
         {std::lock_guard<std::mutex> lock(devicesMutex);devices[dispatchKey(d)]=s;deviceGeneration.fetch_add(1,std::memory_order_release);}note(vrEnabled()?"native SFS experimental OpenXR producer initialized":"native multiview probe initialized; fixed identity projection; NOT VR");return true;
-    }catch(const std::exception& e){note(e.what());if(s->params)FN(vkDestroyBuffer)(d,s->params,nullptr);if(s->paramsMemory)FN(vkFreeMemory)(d,s->paramsMemory,nullptr);return false;}
+    }catch(const std::exception& e){note(e.what());if(s->paramsMapped)FN(vkUnmapMemory)(d,s->paramsMemory);if(s->params)FN(vkDestroyBuffer)(d,s->params,nullptr);if(s->paramsMemory)FN(vkFreeMemory)(d,s->paramsMemory,nullptr);return false;}
 }
-void shutdown(VkDevice d){if(!nativeProbeEnabled())return;std::shared_ptr<State> s;try{s=state(d)->shared_from_this();}catch(const std::exception&){return;}std::unique_lock<std::shared_mutex> lock(s->mutex);if(FN(vkDeviceWaitIdle)(d)!=VK_SUCCESS)commandFailure("SFS shutdown retirement failed");if(s->waterCapture){s->waterCapture->poll(false);s->waterCapture->shutdown();}for(auto& c:s->commands)c.second.gpu.shutdownAfterCompletion();handDepth::handSceneDeviceDestroyed();s->commandRetirement.fetch_add(1,std::memory_order_release);s->commands.clear();s->queryResolver.reset();if(s->sources)s->sources->clearAfterDeviceIdle();for(auto& entry:s->eyeViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.clear();for(auto& module:s->compiled)FN(vkDestroyShaderModule)(d,module.second,nullptr);FN(vkDestroyBuffer)(d,s->params,nullptr);FN(vkFreeMemory)(d,s->paramsMemory,nullptr);std::lock_guard<std::mutex> devicesLock(devicesMutex);for(auto it=devices.begin();it!=devices.end();)if(it->second==s)it=devices.erase(it);else ++it;deviceGeneration.fetch_add(1,std::memory_order_release);}
+void shutdown(VkDevice d){if(!nativeProbeEnabled())return;std::shared_ptr<State> s;try{s=state(d)->shared_from_this();}catch(const std::exception&){return;}std::unique_lock<std::shared_mutex> lock(s->mutex);if(FN(vkDeviceWaitIdle)(d)!=VK_SUCCESS)commandFailure("SFS shutdown retirement failed");if(s->waterCapture){s->waterCapture->poll(false);s->waterCapture->shutdown();}for(auto& c:s->commands)c.second.gpu.shutdownAfterCompletion();handDepth::handSceneDeviceDestroyed();s->commandRetirement.fetch_add(1,std::memory_order_release);s->commands.clear();s->queryResolver.reset();if(s->sources)s->sources->clearAfterDeviceIdle();for(auto& entry:s->eyeViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.clear();for(auto& module:s->compiled)FN(vkDestroyShaderModule)(d,module.second,nullptr);FN(vkUnmapMemory)(d,s->paramsMemory);FN(vkDestroyBuffer)(d,s->params,nullptr);FN(vkFreeMemory)(d,s->paramsMemory,nullptr);std::lock_guard<std::mutex> devicesLock(devicesMutex);for(auto it=devices.begin();it!=devices.end();)if(it->second==s)it=devices.erase(it);else ++it;deviceGeneration.fetch_add(1,std::memory_order_release);}
 bool vrEnabled(){static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("ARGENT_SFS_NATIVE_VR",value,8)==1&&value[0]=='1';}();return nativeProbeEnabled()&&enabled;}
 bool dlssEyeResources(VkCommandBuffer command,const std::array<const dlss::Resource*,30>& input,std::array<dlss::EyeParameters,2>& output,FramePose& pose){
     auto s=state(command);std::unique_lock<std::shared_mutex> lock(s->mutex);
@@ -858,17 +858,16 @@ VkResult beginFrame(VkDevice d,VkSwapchainKHR chain,uint32_t imageIndex){
     const auto retireStart=s->profileTiming?clockNow():0;
     const auto retired=FN(vkDeviceWaitIdle)(d);
     if(retired!=VK_SUCCESS){note("SFS frame parameter retirement failed result="+std::to_string(retired));return retired;}
-    const auto uploadStart=s->profileTiming?clockNow():0;
+    const auto retireEnd=s->profileTiming?clockNow():0;
     if(argent::perf::enabled()){
         const auto diagnosticStart=clockNow();performanceReadCompleted(s);argent::perf::nextFrame(s->pendingPose.serial,s->pendingPose.quadView);
         const auto diagnosticMs=double(clockNow()-diagnosticStart)/1000000.;
         if(diagnosticMs>=0.2)note("PERF_READBACK_CPU serial="+std::to_string(s->pendingPose.serial)+" ms="+std::to_string(diagnosticMs));
     }
-    void* mapped{};const auto mapResult=FN(vkMapMemory)(d,s->paramsMemory,0,sizeof(EyeUniforms),0,&mapped);
-    if(mapResult!=VK_SUCCESS){note("SFS frame parameter map failed result="+std::to_string(mapResult));return mapResult;}
-    std::memcpy(mapped,&s->pendingUniforms,sizeof(EyeUniforms));FN(vkUnmapMemory)(d,s->paramsMemory);
+    const auto uploadStart=s->profileTiming?clockNow():0;
+    std::memcpy(s->paramsMapped,&s->pendingUniforms,sizeof(EyeUniforms));
     if(s->profileTiming){
-        const auto retire=uploadStart-retireStart;
+        const auto retire=retireEnd-retireStart;
         s->retireNs+=retire;s->uploadNs+=clockNow()-uploadStart;
         if(retire>s->maxRetireNs)s->maxRetireNs=retire;
         if(++s->profiledFrames==120){
