@@ -26,7 +26,7 @@
 static PFN_vkGetDeviceProcAddr driverResolver{};
 static VkResult retirementFailure=VK_SUCCESS;
 static VkResult parameterMapFailure=VK_SUCCESS;
-static unsigned parameterMaps{},parameterUnmaps{},parameterFrees{};
+static unsigned parameterMaps{},parameterUnmaps{},parameterFrees{},parameterRetirements{};
 static VkDeviceMemory parameterMemory{};
 static void* parameterData{};
 static bool parameterFreedWhileMapped{};
@@ -61,6 +61,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL testCreatePass(VkDevice device,const VkRen
  return reinterpret_cast<PFN_vkCreateRenderPass>(driverResolver(device,"vkCreateRenderPass"))(device,info,callbacks,pass);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL testRetirement(VkDevice device){
+ ++parameterRetirements;
  if(retirementFailure!=VK_SUCCESS)return retirementFailure;
  return reinterpret_cast<PFN_vkDeviceWaitIdle>(driverResolver(device,"vkDeviceWaitIdle"))(device);
 }
@@ -384,7 +385,7 @@ int main(int argc,char** argv){try{
   auto barrier=[&](VkImageLayout oldLayout,VkImageLayout newLayout,VkAccessFlags src,VkAccessFlags dst){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=images[index];b.oldLayout=oldLayout;b.newLayout=newLayout;b.srcAccessMask=src;b.dstAccessMask=dst;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,2};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);};
 #ifdef KHARVOX_SFS_RING_RUNTIME
   VkClearValue initialClear{};VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};passBegin.renderPass=pass;passBegin.framebuffer=framebuffers[index];passBegin.renderArea.extent={4,4};passBegin.clearValueCount=1;passBegin.pClearValues=&initialClear;
-  argent::sfs::FramePose pose;pose.serial=frame+1;argent::sfs::EyeUniforms uniforms{{argent::sfs::identity(),argent::sfs::identity()},{}};
+  argent::sfs::FramePose pose;pose.serial=frame+1;pose.displayTime=100+frame;pose.views[0].pose.position.x=float(frame);argent::sfs::EyeUniforms uniforms{{argent::sfs::identity(),argent::sfs::identity()},{}};
 #ifdef ARGENT_TEST_OPENXR
   XrPosef head{};auto deadline=GetTickCount64()+15000;while(!argent::beginStereoFrame(xrDevice,xrSource,pose,head,GetEnvironmentVariableW(L"ARGENT_TEST_MENU_QUAD",nullptr,0)!=0)){check(GetTickCount64()<deadline,"OpenXR did not become renderable");Sleep(10);}
   if(!calibratedValid){calibrated=head;calibratedValid=true;}
@@ -401,8 +402,20 @@ int main(int argc,char** argv){try{
     uniforms.clipFromCenter[e][0]=uniforms.clipFromCenter[e][5]=w;
     uniforms.clipFromCenter[e][12]*=w;uniforms.eyeTranslation[e][3]=w-1;
   }
- #endif
 #endif
+#endif
+  if(frame==3)uniforms.diagnostics[2]=-0.0f;
+  const bool payloadChanged=frame==0||std::memcmp(parameterData,&uniforms,sizeof(uniforms))!=0;
+  if(frame==2){
+   const auto changed=[&]{auto value=uniforms;value.clipFromCenter[0][0]+=.125f;return value;}();
+   std::array<unsigned char,sizeof(uniforms)> before{};std::memcpy(before.data(),parameterData,before.size());
+   argent::sfs::StereoFrame previous;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,previous),"Missing previous image provenance");
+   argent::sfs::prepare(device,pose,changed);retirementFailure=VK_ERROR_DEVICE_LOST;
+   check(argent::sfs::beginFrame(device,chain,index)==VK_ERROR_DEVICE_LOST,"Changed parameters bypassed failed retirement");
+   check(std::memcmp(parameterData,before.data(),before.size())==0,"Failed update changed installed parameter bytes");
+   argent::sfs::StereoFrame preserved;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,preserved)&&preserved.generation==previous.generation&&preserved.pose.displayTime==previous.pose.displayTime,"Failed update advanced image provenance");
+   retirementFailure=VK_SUCCESS;
+  }
   argent::sfs::prepare(device,pose,uniforms);
   if(frame==0){
    std::array<unsigned char,sizeof(argent::sfs::EyeUniforms)> before{};std::memcpy(before.data(),parameterData,before.size());
@@ -413,11 +426,20 @@ int main(int argc,char** argv){try{
    check(!argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,rejected),"Failed retirement published a frame");
    retirementFailure=VK_SUCCESS;
   }
+  const auto retirementsBefore=parameterRetirements;
+  if(!payloadChanged&&!performanceTest)retirementFailure=VK_ERROR_DEVICE_LOST;
   const auto uniformStart=std::chrono::steady_clock::now();
   ok(argent::sfs::beginFrame(device,chain,index));
   if(benchmark&&frame%120>=20)uniformTimes[frame/120].push_back(std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-uniformStart).count());
+  retirementFailure=VK_SUCCESS;
+  check(parameterRetirements-retirementsBefore==unsigned(payloadChanged||performanceTest),"Unchanged payload did not elide retirement or diagnostics lost retirement");
   check(std::memcmp(parameterData,&uniforms,sizeof(uniforms))==0,"Published frame differs from mapped parameter bytes");
   check(parameterMaps==2&&parameterUnmaps==0,"Frame publication remapped parameter memory");
+  if(frame==1){
+   const auto gated=[&]{auto value=pose;value.serial+=1000;return value;}();argent::sfs::prepare(device,gated,uniforms);
+   ok(argent::sfs::beginFrame(device,chain,index));
+   argent::sfs::StereoFrame current;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,current)&&current.generation==pose.serial,"Unchanged payload bypassed the presentation gate");
+  }
   if(performanceTest)argent::perf::mode.store(2);
   ok(vkResetCommandBuffer(command,0));ok(vkBeginCommandBuffer(command,&begin));timing.begin(command);
   vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,nullptr);
@@ -512,7 +534,7 @@ int main(int argc,char** argv){try{
 #ifndef ARGENT_TEST_OPENXR
   for(uint32_t eye=0;eye<2;++eye)for(uint32_t pixel=0;pixel<16;++pixel){const auto offset=eye*64+pixel*4;const bool lit=(pixel%4<2)==(eye==0);check(bytes[offset]==(lit?255:0),"Per-eye projection or multiview pipeline incorrect");}
 #endif
-  argent::sfs::StereoFrame pair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,pair),"No qualified stereo pair");check(pair.generation==pose.serial&&pair.eyes[0].serial==pair.eyes[1].serial&&pair.eyes[1].layer==1,"Frame provenance mismatch");argent::sfs::copyCompleted(device);
+  argent::sfs::StereoFrame pair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,pair),"No qualified stereo pair");check(pair.generation==pose.serial&&pair.eyes[0].serial==pair.eyes[1].serial&&pair.eyes[1].layer==1,"Frame provenance mismatch");check(pair.pose.displayTime==pose.displayTime&&pair.eyes[0].pose.position.x==pose.views[0].pose.position.x,"Unchanged uniform bytes retained stale pose metadata");argent::sfs::copyCompleted(device);
 
 #ifdef KHARVOX_SFS_TEST_INDIRECT
   for(unsigned eye=0;eye<2;++eye)for(unsigned pixel=0;pixel<16;++pixel)check(std::abs(int(bytes[eye*64+pixel*4+2])-(frame%4?128:32))<=1,"Indirect grid/eye output or pipeline restoration incorrect");

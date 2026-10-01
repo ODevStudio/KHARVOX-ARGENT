@@ -48,6 +48,8 @@
 namespace argent::sfs {
 using namespace kharvox::sfs;
 namespace handDepth=kharvox::hands;
+static_assert(std::is_trivially_copyable_v<EyeUniforms>);
+static_assert(sizeof(EyeUniforms)==sizeof(EyeUniforms::clipFromCenter)+sizeof(EyeUniforms::eyeTranslation)+sizeof(EyeUniforms::screenClip)+sizeof(EyeUniforms::diagnostics));
 namespace {
 // Developer-only native multiview/OpenXR prototype. Headset validation and
 // complete profile lighting corrections are required before a playable release.
@@ -132,6 +134,7 @@ struct State : std::enable_shared_from_this<State> {
     bool pending{},completed{true},frameValid{};
     bool profileTiming{};
     uint64_t profiledFrames{},retireNs{},uploadNs{},maxRetireNs{};
+    uint64_t uniformPayloadChanged{},uniformPayloadUnchanged{},deviceIdleCalls{},metadataLockWaitNs{};
     std::atomic<uint64_t> pipelineBuilds{},pipelineBuildWallNs{},pipelineBuildCpuUs{},pipelineBuildCpuSamples{},pipelineBuildCompileNs{},pipelineBuildDriverNs{},pipelineBuildLockNs{},pipelineBuildMaxNs{};
     std::unordered_map<VkShaderModule,std::vector<uint32_t>> shaders;
     std::unordered_map<std::string,VkShaderModule> compiled;
@@ -849,26 +852,33 @@ void performanceReadCompleted(State* s){
  s->census.report([](const std::string& message){note(message);});
 }
 VkResult beginFrame(VkDevice d,VkSwapchainKHR chain,uint32_t imageIndex){
-    if(!vrEnabled())return VK_SUCCESS;auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);
+    if(!vrEnabled())return VK_SUCCESS;auto s=state(d);
+    const auto lockStart=s->profileTiming?CommandCpuTiming::now():0;
+    std::unique_lock<std::shared_mutex> lock(s->mutex);
+    const auto lockWait=s->profileTiming?CommandCpuTiming::now()-lockStart:0;
     if(s->pending&&s->completed){
-    // The prototype shares a uniform buffer across recorded command buffers.
-    // Retire all previous readers before writing; a frame ring can replace this
-    // conservative wait once multiple queued game frames have explicit ownership.
+    const bool payloadChanged=!s->frameValid||std::memcmp(&s->pendingUniforms,&s->renderUniforms,sizeof(EyeUniforms))!=0;
+    const bool retirementRequired=payloadChanged||argent::perf::enabled();
     const auto clockNow=[] {return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());};
-    const auto retireStart=s->profileTiming?clockNow():0;
-    const auto retired=FN(vkDeviceWaitIdle)(d);
-    if(retired!=VK_SUCCESS){note("SFS frame parameter retirement failed result="+std::to_string(retired));return retired;}
-    const auto retireEnd=s->profileTiming?clockNow():0;
+    const auto retireStart=s->profileTiming&&retirementRequired?clockNow():0;
+    if(retirementRequired){
+        const auto retired=FN(vkDeviceWaitIdle)(d);
+        if(retired!=VK_SUCCESS){note("SFS frame parameter retirement failed result="+std::to_string(retired));return retired;}
+    }
+    const auto retireEnd=s->profileTiming&&retirementRequired?clockNow():0;
     if(argent::perf::enabled()){
         const auto diagnosticStart=clockNow();performanceReadCompleted(s);argent::perf::nextFrame(s->pendingPose.serial,s->pendingPose.quadView);
         const auto diagnosticMs=double(clockNow()-diagnosticStart)/1000000.;
         if(diagnosticMs>=0.2)note("PERF_READBACK_CPU serial="+std::to_string(s->pendingPose.serial)+" ms="+std::to_string(diagnosticMs));
     }
-    const auto uploadStart=s->profileTiming?clockNow():0;
-    std::memcpy(s->paramsMapped,&s->pendingUniforms,sizeof(EyeUniforms));
+    const auto uploadStart=s->profileTiming&&payloadChanged?clockNow():0;
+    if(payloadChanged)std::memcpy(s->paramsMapped,&s->pendingUniforms,sizeof(EyeUniforms));
+    const auto uploadEnd=s->profileTiming&&payloadChanged?clockNow():0;
     if(s->profileTiming){
         const auto retire=retireEnd-retireStart;
-        s->retireNs+=retire;s->uploadNs+=clockNow()-uploadStart;
+        s->retireNs+=retire;s->uploadNs+=uploadEnd-uploadStart;s->metadataLockWaitNs+=lockWait;
+        if(payloadChanged)++s->uniformPayloadChanged;else ++s->uniformPayloadUnchanged;
+        if(retirementRequired)++s->deviceIdleCalls;
         if(retire>s->maxRetireNs)s->maxRetireNs=retire;
         if(++s->profiledFrames==120){
             const auto indirectMono=s->indirectMono.exchange(0,std::memory_order_relaxed),indirectStereo=s->indirectStereo.exchange(0,std::memory_order_relaxed),mixed=s->mixedPasses.exchange(0,std::memory_order_relaxed);
@@ -888,8 +898,13 @@ VkResult beginFrame(VkDevice d,VkSwapchainKHR chain,uint32_t imageIndex){
                 +" estimatedAggregateHookMsPerFrame="+std::to_string(double(wait+body)*64.0/120000000.0));
             note("parameter timing frames=120 deviceIdleMeanMs="+std::to_string(double(s->retireNs)/120000000.0)
                 +" deviceIdleMaxMs="+std::to_string(double(s->maxRetireNs)/1000000.0)
-                +" uploadMeanMs="+std::to_string(double(s->uploadNs)/120000000.0));
+                +" uploadMeanMs="+std::to_string(double(s->uploadNs)/120000000.0)
+                +" metadataLockWaitMeanMs="+std::to_string(double(s->metadataLockWaitNs)/120000000.0)
+                +" uniformPayloadChanged="+std::to_string(s->uniformPayloadChanged)
+                +" uniformPayloadUnchanged="+std::to_string(s->uniformPayloadUnchanged)
+                +" deviceIdleCalls="+std::to_string(s->deviceIdleCalls));
             s->profiledFrames=s->retireNs=s->uploadNs=s->maxRetireNs=0;
+            s->uniformPayloadChanged=s->uniformPayloadUnchanged=s->deviceIdleCalls=s->metadataLockWaitNs=0;
         }
     }
     handDepth::handSceneBeginFrame();s->renderPose=s->pendingPose;s->frameValid=true;s->pending=false;s->completed=false;

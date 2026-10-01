@@ -474,7 +474,8 @@ VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_
  {static argent::FrameTiming::Totals t;argent::FrameTiming timing("uniformRetirementAndUpload",t);
   // Match KHARVOX: no queue submit may race the drain or uniform upload.
   // Acquire queue before SFS metadata, matching the submission lock order.
-  std::lock_guard<std::recursive_mutex> queueLock(*s->queueMutex);
+  std::unique_lock<std::recursive_mutex> queueLock(*s->queueMutex,std::defer_lock);
+  {static argent::FrameTiming::Totals queueWait;argent::FrameTiming timing("uniformQueueLockWait",queueWait);queueLock.lock();}
   result=argent::sfs::beginFrame(s->device,sc,image);}
  if(result!=VK_SUCCESS){
   if(result==VK_ERROR_DEVICE_LOST){
