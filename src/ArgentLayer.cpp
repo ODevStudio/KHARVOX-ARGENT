@@ -506,9 +506,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchain
        if(!argent::sfs::configureSourceRing(d,s->gdpa,mem,s->graphicsQueue,nullptr,nullptr))return VK_ERROR_INITIALIZATION_FAILED;}
       if(ci->oldSwapchain){auto old=s->mirrors.find(ci->oldSwapchain);if(old!=s->mirrors.end()){old->second->destroy(*s);s->mirrors.erase(old);}}
       modified.imageArrayLayers=2;
+      char fsr[8]{};
+      if(GetEnvironmentVariableA("ARGENT_FSR1",fsr,sizeof(fsr))==1&&fsr[0]=='1'
+          &&(ci->imageFormat==VK_FORMAT_R8G8B8A8_UNORM||ci->imageFormat==VK_FORMAT_B8G8R8A8_UNORM)){
+        const auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceImageFormatProperties"));
+        const auto formatQuery=reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceFormatProperties"));
+        VkImageFormatProperties properties{};VkFormatProperties features{};
+        const auto usage=modified.imageUsage|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
+        if(formatQuery)formatQuery(s->physical,ci->imageFormat,&features);
+        if(query&&(features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+            &&query(s->physical,ci->imageFormat,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&properties)==VK_SUCCESS
+            &&properties.maxExtent.width>=ci->imageExtent.width&&properties.maxExtent.height>=ci->imageExtent.height
+            &&properties.maxArrayLayers>=2&&(properties.sampleCounts&VK_SAMPLE_COUNT_1_BIT))
+          modified.imageUsage|=VK_IMAGE_USAGE_SAMPLED_BIT;
+      }
       if(s->queueFamilies.size()>1){modified.imageSharingMode=VK_SHARING_MODE_CONCURRENT;modified.queueFamilyIndexCount=uint32_t(s->queueFamilies.size());modified.pQueueFamilyIndices=s->queueFamilies.data();}
       auto r=argent::sfs::createSourceSwapchain(d,modified,out);if(r!=VK_SUCCESS){argent::log("SFS_SOURCE_CREATE_FAILED result="+std::to_string(r));return r;}
       argent::Source source;source.extent=ci->imageExtent;source.format=ci->imageFormat;source.displaySrgb=ci->imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;source.transferable=true;uint32_t count{};
+      source.sampled=(modified.imageUsage&VK_IMAGE_USAGE_SAMPLED_BIT)!=0;
       argent::sfs::sourceImages(d,*out,&count,nullptr);source.images.resize(count);argent::sfs::sourceImages(d,*out,&count,source.images.data());
       argent::sfs::swapchainImages(d,*out,count,source.images.data());
       {std::lock_guard<std::recursive_mutex> lock(stateMutex);s->sources[*out]=std::move(source);}
@@ -534,7 +549,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchain
 VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice d,VkSwapchainKHR sc,const VkAllocationCallbacks* a){
     auto s=deviceOf(key(d));auto mirror=s->mirrors.find(sc);if(mirror!=s->mirrors.end()){mirror->second->destroy(*s);s->mirrors.erase(mirror);}
     {std::lock_guard<std::recursive_mutex> l(stateMutex);s->sources.erase(sc);}
-    if(argent::sfs::sourceSwapchain(d,sc)){argent::cancelStereoFrame();argent::sfs::swapchainDestroyed(d,sc);argent::sfs::destroySourceSwapchain(d,sc);}
+    if(argent::sfs::sourceSwapchain(d,sc)){argent::cancelStereoFrame();argent::retireStereoSources(d);argent::sfs::swapchainDestroyed(d,sc);argent::sfs::destroySourceSwapchain(d,sc);}
     else s->proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(d,sc,a);
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKHR* p){

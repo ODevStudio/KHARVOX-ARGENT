@@ -294,3 +294,13 @@ bool presentStereoFrame(Device& d,const sfs::StereoFrame& pair,uint32_t n,const 
     auto present=[&]{return presentStereoImpl(d,pair,n,waits,mirror);};return simulator?xrWorker().invoke(present):present();
 }
 void cancelStereoFrame(){auto cancel=[] {std::lock_guard<std::recursive_mutex> guard(mutex);cancelStereoImpl();};if(simulator)xrWorker().invoke(cancel);else cancel();}
+void retireStereoSources(VkDevice d){
+    auto retire=[&]{
+        std::lock_guard<std::recursive_mutex> guard(mutex);
+        if(boundDevice!=d||!fsr1.active())return;
+        std::lock_guard<std::recursive_mutex> queueGuard(*device.queueMutex);
+        if(VK(vkQueueWaitIdle)(boundQueue)!=VK_SUCCESS){failed=true;return;}
+        destroySwapchain();
+    };
+    if(simulator)xrWorker().invoke(retire);else retire();
+}

@@ -69,6 +69,13 @@ struct Fsr1Upscaler::Impl {
     VkSampler sampler{};
     VkDescriptorSetLayout descriptorSetLayout{};
     VkDescriptorPool descriptorPool{};
+    struct StereoSource {
+        VkImage image{};
+        std::array<VkImageView, 2> views{};
+        std::array<VkDescriptorSet, 2> sets{};
+    };
+    std::vector<StereoSource> stereoSources;
+    VkDescriptorPool stereoSourcePool{};
     std::array<VkDescriptorSet, 4> descriptorSets{};
     VkPipelineLayout pipelineLayout{};
     VkPipeline easuPipeline{};
@@ -93,7 +100,8 @@ struct Fsr1Upscaler::Impl {
 
     void transition(VkCommandBuffer commandBuffer, VkImage image,
                     VkImageLayout oldLayout, VkImageLayout newLayout,
-                    VkAccessFlags sourceAccess, VkAccessFlags destinationAccess) {
+                    VkAccessFlags sourceAccess, VkAccessFlags destinationAccess,
+                    uint32_t layer = 0) {
         VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         barrier.oldLayout = oldLayout;
         barrier.newLayout = newLayout;
@@ -105,6 +113,7 @@ struct Fsr1Upscaler::Impl {
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
         barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.baseArrayLayer = layer;
         vk.cmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr,
             1, &barrier);
@@ -287,9 +296,19 @@ struct Fsr1Upscaler::Impl {
         return true;
     }
 
+    void destroyStereoSources() {
+        if (stereoSourcePool) vk.destroyDescriptorPool(device, stereoSourcePool, nullptr);
+        for (const auto& source : stereoSources)
+            for (const auto view : source.views)
+                if (view) vk.destroyImageView(device, view, nullptr);
+        stereoSources.clear();
+        stereoSourcePool = VK_NULL_HANDLE;
+    }
+
     void destroyAll() {
         ready = false;
         if (!device) return;
+        destroyStereoSources();
         if (easuPipeline && vk.destroyPipeline)
             vk.destroyPipeline(device, easuPipeline, nullptr);
         if (rcasPipeline && vk.destroyPipeline)
@@ -392,6 +411,55 @@ bool Fsr1Upscaler::active() const {
     return impl_ && impl_->ready;
 }
 
+bool Fsr1Upscaler::configureStereoSources(VkFormat format, const std::vector<VkImage>& images) {
+    auto& state = *impl_;
+    if (!state.ready || state.stereoSourcePool || images.empty()
+        || images.size() > UINT32_MAX / 2 || format != state.inputFormat
+        || std::any_of(images.begin(), images.end(), [](VkImage image) { return !image; }))
+        return false;
+    const auto count = static_cast<uint32_t>(images.size()) * 2;
+    const std::array<VkDescriptorPoolSize, 2> sizes{{
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count},
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, count}
+    }};
+    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pool.maxSets = count;pool.poolSizeCount = static_cast<uint32_t>(sizes.size());pool.pPoolSizes = sizes.data();
+    if (state.vk.createDescriptorPool(state.device, &pool, nullptr, &state.stereoSourcePool) != VK_SUCCESS)
+        return false;
+    const auto fail = [&] { state.destroyStereoSources();return false; };
+    for (const auto image : images) {
+        state.stereoSources.push_back({image});
+        auto& source = state.stereoSources.back();
+        const std::array<VkDescriptorSetLayout, 2> layouts{{state.descriptorSetLayout, state.descriptorSetLayout}};
+        VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocation.descriptorPool = state.stereoSourcePool;
+        allocation.descriptorSetCount = static_cast<uint32_t>(layouts.size());allocation.pSetLayouts = layouts.data();
+        if (state.vk.allocateDescriptorSets(state.device, &allocation, source.sets.data()) != VK_SUCCESS)
+            return fail();
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+            view.image = image;view.viewType = VK_IMAGE_VIEW_TYPE_2D;view.format = format;
+            view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, eye, 1};
+            if (state.vk.createImageView(state.device, &view, nullptr, &source.views[eye]) != VK_SUCCESS)
+                return fail();
+            const std::array<VkDescriptorImageInfo, 2> imageInfo{{
+                {state.sampler, source.views[eye], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {VK_NULL_HANDLE, state.easu[eye].view, VK_IMAGE_LAYOUT_GENERAL}
+            }};
+            std::array<VkWriteDescriptorSet, 2> writes{};
+            for (uint32_t binding = 0; binding < 2; ++binding) {
+                auto& write = writes[binding];write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = source.sets[eye];write.dstBinding = binding;write.descriptorCount = 1;
+                write.descriptorType = binding == 0 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                write.pImageInfo = &imageInfo[binding];
+            }
+            state.vk.updateDescriptorSets(state.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        }
+    }
+    fsrLog("direct stereo source sampling ACTIVE; two source copies per frame removed");
+    return true;
+}
+
 void Fsr1Upscaler::releaseAfterCompletion() {
     impl_->destroyAll();
     *impl_ = Impl{};
@@ -435,24 +503,33 @@ VkImage Fsr1Upscaler::record(VkCommandBuffer commandBuffer, VkImage source,
     auto& input = state.input[eye];
     auto& easu = state.easu[eye];
     auto& output = state.output[eye];
-    state.transition(commandBuffer, input.image,
-        input.initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        input.initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
-        VK_ACCESS_TRANSFER_WRITE_BIT);
-    VkImageCopy inputCopy{};
-    inputCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    inputCopy.srcSubresource.layerCount = 1;
-    inputCopy.srcSubresource.baseArrayLayer = sourceLayer;
-    inputCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    inputCopy.dstSubresource.layerCount = 1;
-    inputCopy.extent = {state.sourceExtent.width, state.sourceExtent.height, 1};
-    state.vk.cmdCopyImage(commandBuffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &inputCopy);
-    state.transition(commandBuffer, input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT);
-    input.initialized = true;
+    const auto stereoSource = std::find_if(state.stereoSources.begin(), state.stereoSources.end(),
+        [&](const auto& candidate) { return candidate.image == source; });
+    const bool direct = sourceLayer == uint32_t(eye) && stereoSource != state.stereoSources.end();
+    if (direct) {
+        state.transition(commandBuffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_ACCESS_SHADER_READ_BIT, sourceLayer);
+    } else {
+        state.transition(commandBuffer, input.image,
+            input.initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            input.initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkImageCopy inputCopy{};
+        inputCopy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        inputCopy.srcSubresource.layerCount = 1;
+        inputCopy.srcSubresource.baseArrayLayer = sourceLayer;
+        inputCopy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        inputCopy.dstSubresource.layerCount = 1;
+        inputCopy.extent = {state.sourceExtent.width, state.sourceExtent.height, 1};
+        state.vk.cmdCopyImage(commandBuffer, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &inputCopy);
+        state.transition(commandBuffer, input.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+        input.initialized = true;
+    }
 
     state.transition(commandBuffer, easu.image,
         easu.initialized ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED,
@@ -488,7 +565,7 @@ VkImage Fsr1Upscaler::record(VkCommandBuffer commandBuffer, VkImage source,
     };
     easuConstants.outputSize = {outputExtent.width, outputExtent.height};
 
-    const auto easuSet = state.descriptorSets[eye * 2];
+    const auto easuSet = direct ? stereoSource->sets[eye] : state.descriptorSets[eye * 2];
     state.vk.cmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
         state.easuPipeline);
     state.vk.cmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -497,6 +574,11 @@ VkImage Fsr1Upscaler::record(VkCommandBuffer commandBuffer, VkImage source,
         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(easuConstants), &easuConstants);
     state.vk.cmdDispatch(commandBuffer, (outputExtent.width + 15u) / 16u,
         (outputExtent.height + 15u) / 16u, 1);
+    if (direct) {
+        state.transition(commandBuffer, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT, sourceLayer);
+    }
     state.transition(commandBuffer, easu.image, VK_IMAGE_LAYOUT_GENERAL,
         VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT);
