@@ -11,6 +11,26 @@
 #include <thread>
 #include <atomic>
 #include <fstream>
+#include <cstring>
+static PFN_vkGetDeviceProcAddr ringDriver{};
+static PFN_vkQueueSubmit submitDriver{};
+static PFN_vkResetFences resetDriver{};
+static PFN_vkWaitForFences waitDriver{};
+static unsigned ringSubmits{},ringResets{},ringWaits{};
+static VkResult ringSubmitFailure=VK_SUCCESS;
+static VKAPI_ATTR VkResult VKAPI_CALL countRingSubmit(VkQueue queue,uint32_t count,const VkSubmitInfo* submits,VkFence fence){
+ ++ringSubmits;
+ if(ringSubmitFailure!=VK_SUCCESS)return ringSubmitFailure;
+ return submitDriver(queue,count,submits,fence);
+}
+static VKAPI_ATTR VkResult VKAPI_CALL countRingReset(VkDevice device,uint32_t count,const VkFence* fences){++ringResets;return resetDriver(device,count,fences);}
+static VKAPI_ATTR VkResult VKAPI_CALL countRingWait(VkDevice device,uint32_t count,const VkFence* fences,VkBool32 all,uint64_t timeout){++ringWaits;return waitDriver(device,count,fences,all,timeout);}
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL ringResolver(VkDevice device,const char* name){
+ if(!std::strcmp(name,"vkQueueSubmit"))return reinterpret_cast<PFN_vkVoidFunction>(countRingSubmit);
+ if(!std::strcmp(name,"vkResetFences"))return reinterpret_cast<PFN_vkVoidFunction>(countRingReset);
+ if(!std::strcmp(name,"vkWaitForFences"))return reinterpret_cast<PFN_vkVoidFunction>(countRingWait);
+ return ringDriver(device,name);
+}
 static void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 static void ok(VkResult result){if(result!=VK_SUCCESS)throw std::runtime_error("Vulkan result "+std::to_string(result));}
 int main(int argc,char** argv){try{
@@ -53,19 +73,20 @@ int main(int argc,char** argv){try{
  DEVICE(vkCreateBuffer);DEVICE(vkGetBufferMemoryRequirements);DEVICE(vkAllocateMemory);DEVICE(vkBindBufferMemory);DEVICE(vkMapMemory);DEVICE(vkUnmapMemory);DEVICE(vkFreeMemory);DEVICE(vkDestroyBuffer);
  DEVICE(vkCreateSemaphore);DEVICE(vkDestroySemaphore);DEVICE(vkCreateFence);DEVICE(vkDestroyFence);DEVICE(vkResetFences);DEVICE(vkWaitForFences);DEVICE(vkQueueSubmit);DEVICE(vkDeviceWaitIdle);DEVICE(vkDestroyCommandPool);DEVICE(vkDestroyDevice);
  VkQueue queue{};vkGetDeviceQueue(device,family,0,&queue);VkPhysicalDeviceMemoryProperties memory{};vkGetPhysicalDeviceMemoryProperties(physical,&memory);
+ ringDriver=vkGetDeviceProcAddr;submitDriver=vkQueueSubmit;resetDriver=vkResetFences;waitDriver=vkWaitForFences;
  #ifdef KHARVOX_SFS_RING_RUNTIME
- check(kharvox::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr,nullptr),"Runtime ring init failed");
+ check(kharvox::sfs::configureSourceRing(device,ringResolver,memory,queue,nullptr,nullptr),"Runtime ring init failed");
  struct RuntimeRing {
   VkDevice device;
   VkResult create(const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* out){return kharvox::sfs::createSourceSwapchain(device,info,out);}
   VkResult enumerate(VkSwapchainKHR c,uint32_t* n,VkImage* images){auto r=kharvox::sfs::sourceImages(device,c,n,images);if(r==VK_SUCCESS&&images)kharvox::sfs::swapchainImages(device,c,*n,images);return r;}
   VkResult acquire(VkSwapchainKHR c,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* index){return kharvox::sfs::acquireSource(device,c,timeout,sem,fence,index);}
-  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed){return kharvox::sfs::presentSource(device,q,info,consumed);}
+  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed,bool sourceComplete=false){return kharvox::sfs::presentSource(device,q,info,consumed,sourceComplete);}
   VkResult destroy(VkSwapchainKHR c){kharvox::sfs::swapchainDestroyed(device,c);kharvox::sfs::destroySourceSwapchain(device,c);return VK_SUCCESS;}
  } ring{device};
  DEVICE(vkCreateImageView);DEVICE(vkDestroyImageView);DEVICE(vkCreateRenderPass);DEVICE(vkDestroyRenderPass);DEVICE(vkCreateFramebuffer);DEVICE(vkDestroyFramebuffer);DEVICE(vkCmdBeginRenderPass);DEVICE(vkCmdEndRenderPass);
 #else
- kharvox::sfs::SourceRing ring;check(ring.initialize(device,queue,vkGetDeviceProcAddr,memory,nullptr,nullptr),"Ring init failed");
+ kharvox::sfs::SourceRing ring;check(ring.initialize(device,queue,ringResolver,memory,nullptr,nullptr),"Ring init failed");
 #endif
  VkSwapchainCreateInfoKHR chainInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};chainInfo.minImageCount=2;chainInfo.imageFormat=VK_FORMAT_R8G8B8A8_UNORM;chainInfo.imageExtent={4,4};chainInfo.imageArrayLayers=2;chainInfo.imageUsage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 #ifdef KHARVOX_SFS_TEST_INDIRECT
@@ -130,12 +151,21 @@ int main(int argc,char** argv){try{
 #endif
  VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore acquired{},rendered{};ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&acquired));ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&rendered));
  VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence completed{},acquireFence{};ok(vkCreateFence(device,&fenceInfo,nullptr,&completed));ok(vkCreateFence(device,&fenceInfo,nullptr,&acquireFence));
- auto present=[&](uint32_t index,bool consumed,uint32_t waits){VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;ok(ring.present(queue,info,consumed));ok(perImage);};
+ auto present=[&](uint32_t index,bool consumed,uint32_t waits,bool sourceComplete=false){
+  VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;
+  const auto submits=ringSubmits,resets=ringResets;const bool completed=consumed&&sourceComplete;
+  ok(ring.present(queue,info,consumed,sourceComplete));ok(perImage);
+  check(ringSubmits==submits+(completed?0:1)&&ringResets==resets+(completed?0:1),"Incorrect source retirement submission/reset count");
+  check(ring.present(queue,info,consumed,sourceComplete)==VK_ERROR_INITIALIZATION_FAILED,"Presented an unacquired image");
+ };
  VkPhysicalDeviceProperties timingProperties{};vkGetPhysicalDeviceProperties(physical,&timingProperties);
  kharvox::CopyGpuTiming timing;timing.initialize(device,vkGetDeviceProcAddr,timingProperties.limits.timestampPeriod,families[family].timestampValidBits);
  check(timing.pool!=VK_NULL_HANDLE,"GPU timestamp initialization failed");
  for(uint32_t frame=0;frame<20;++frame){
-  uint32_t index=UINT32_MAX;ok(ring.acquire(chain,UINT64_MAX,acquired,acquireFence,&index));check(index==frame%2,"Ring rotation broken");ok(vkWaitForFences(device,1,&acquireFence,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&acquireFence));
+  const auto oldWaits=ringWaits;
+  uint32_t index=UINT32_MAX;ok(ring.acquire(chain,UINT64_MAX,acquired,acquireFence,&index));check(index==frame%2,"Ring rotation broken");
+  check(ringWaits==oldWaits+(frame>=2&&(frame-2)%4!=3?1:0),"Reacquire did not honor pending/completed retirement");
+  ok(vkWaitForFences(device,1,&acquireFence,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&acquireFence));
   ok(vkResetCommandBuffer(command,0));VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ok(vkBeginCommandBuffer(command,&begin));timing.begin(command);
   auto barrier=[&](VkImageLayout oldLayout,VkImageLayout newLayout,VkAccessFlags src,VkAccessFlags dst){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=images[index];b.oldLayout=oldLayout;b.newLayout=newLayout;b.srcAccessMask=src;b.dstAccessMask=dst;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,2};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);};
 #ifdef KHARVOX_SFS_RING_RUNTIME
@@ -167,9 +197,17 @@ int main(int argc,char** argv){try{
   VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,2};copy.imageExtent={4,4,1};vkCmdCopyImageToBuffer(command,images[index],VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,buffer,1,&copy);
   barrier(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_MEMORY_READ_BIT);
   VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&host,0,nullptr,0,nullptr);timing.end(command);ok(vkEndCommandBuffer(command));
-  VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;VkSubmitInfo draw{VK_STRUCTURE_TYPE_SUBMIT_INFO};draw.waitSemaphoreCount=1;draw.pWaitSemaphores=&acquired;draw.pWaitDstStageMask=&stage;draw.commandBufferCount=1;draw.pCommandBuffers=&command;draw.signalSemaphoreCount=1;draw.pSignalSemaphores=&rendered;ok(vkQueueSubmit(queue,1,&draw,VK_NULL_HANDLE));
-  if(frame%2){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,VK_NULL_HANDLE));}
-  present(index,frame%2,1);
+  const bool consumed=frame%2,sourceComplete=frame%4>=2;
+  VkPipelineStageFlags stage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;VkSubmitInfo draw{VK_STRUCTURE_TYPE_SUBMIT_INFO};draw.waitSemaphoreCount=1;draw.pWaitSemaphores=&acquired;draw.pWaitDstStageMask=&stage;draw.commandBufferCount=1;draw.pCommandBuffers=&command;draw.signalSemaphoreCount=1;draw.pSignalSemaphores=&rendered;ok(vkQueueSubmit(queue,1,&draw,sourceComplete&&!consumed?completed:VK_NULL_HANDLE));
+  if(consumed){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,sourceComplete?completed:VK_NULL_HANDLE));}
+  if(sourceComplete){ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));}
+  if(frame==1){
+   VkPresentInfoKHR rejected{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};rejected.swapchainCount=1;rejected.pSwapchains=&chain;rejected.pImageIndices=&index;VkResult perImage=VK_SUCCESS;rejected.pResults=&perImage;
+   ringSubmitFailure=VK_ERROR_OUT_OF_HOST_MEMORY;
+   check(ring.present(queue,rejected,true,false)==ringSubmitFailure&&perImage==ringSubmitFailure,"Failed retirement submission not reported");
+   ringSubmitFailure=VK_SUCCESS;
+  }
+  present(index,consumed,1,sourceComplete);
   VkSubmitInfo finish{VK_STRUCTURE_TYPE_SUBMIT_INFO};ok(vkQueueSubmit(queue,1,&finish,completed));ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));
   double gpuMs{};check(timing.completed(gpuMs)&&std::isfinite(gpuMs)&&gpuMs>=0,"GPU timestamps unavailable after completion");check(!timing.completed(gpuMs),"GPU timestamp sample reused");
   void* mapped{};ok(vkMapMemory(device,readback,0,144,0,&mapped));auto bytes=static_cast<unsigned char*>(mapped);
@@ -179,6 +217,23 @@ int main(int argc,char** argv){try{
   uint32_t sharedCount{};std::memcpy(&sharedCount,bytes+128,4);check(sharedCount==(frame%4?48u:0u),"Shared-buffer-only indirect work was duplicated");
 #endif
   vkUnmapMemory(device,readback);
+ }
+ if(argc>1&&std::string(argv[argc-1])=="benchmark"){
+  std::array<std::vector<double>,2> samples;
+  for(uint32_t frame=0;frame<440;++frame){
+   uint32_t index{};ok(ring.acquire(chain,UINT64_MAX,VK_NULL_HANDLE,acquireFence,&index));
+   ok(vkWaitForFences(device,1,&acquireFence,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&acquireFence));
+   VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;
+   const bool sourceComplete=frame%2;const auto submits=ringSubmits;
+   const auto start=std::chrono::steady_clock::now();const auto result=ring.present(queue,info,true,sourceComplete);
+   const double us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count();
+   ok(result);check(ringSubmits==submits+(sourceComplete?0:1),"Benchmark retirement submission count incorrect");
+   if(frame>=40)samples[sourceComplete].push_back(us);
+  }
+  for(unsigned mode=0;mode<2;++mode){
+   auto& times=samples[mode];std::sort(times.begin(),times.end());
+   std::cout<<"Source retirement benchmark completed="<<mode<<" samples="<<times.size()<<" medianUs="<<times[times.size()/2]<<" p95Us="<<times[times.size()*95/100]<<'\n';
+  }
  }
  std::array<uint32_t,2> leased{};for(auto& index:leased){ok(ring.acquire(chain,UINT64_MAX,VK_NULL_HANDLE,acquireFence,&index));ok(vkWaitForFences(device,1,&acquireFence,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&acquireFence));}
  uint32_t unavailable=99;check(ring.acquire(chain,0,acquired,VK_NULL_HANDLE,&unavailable)==VK_NOT_READY&&unavailable==99,"Acquired a leased image");check(ring.acquire(chain,1000000,acquired,VK_NULL_HANDLE,&unavailable)==VK_TIMEOUT,"Exhaustion timeout broken");
@@ -199,5 +254,5 @@ int main(int argc,char** argv){try{
  kharvox::sfs::shutdown(device);
 #endif
  vkDestroyDevice(device,nullptr);vkDestroyInstance(instance,nullptr);FreeLibrary(loader);
- std::cout<<"Source ring: 20 frames, both eye readbacks, acquire signals, consumed/unconsumed waits, exhaustion and recreation passed\n";return 0;
+ std::cout<<"Source ring: 20 frames, both eye readbacks, completion-gated retirement, submit failure, acquire signals, exhaustion and recreation passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

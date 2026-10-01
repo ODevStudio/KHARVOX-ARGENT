@@ -16,7 +16,7 @@ bool sourceSwapchain(VkDevice,VkSwapchainKHR);
 VkResult createSourceSwapchain(VkDevice,const VkSwapchainCreateInfoKHR&,VkSwapchainKHR*);
 VkResult sourceImages(VkDevice,VkSwapchainKHR,uint32_t*,VkImage*);
 VkResult acquireSource(VkDevice,VkSwapchainKHR,uint64_t,VkSemaphore,VkFence,uint32_t*);
-VkResult presentSource(VkDevice,VkQueue,const VkPresentInfoKHR&,bool);
+VkResult presentSource(VkDevice,VkQueue,const VkPresentInfoKHR&,bool,bool sourceComplete=false);
 void destroySourceSwapchain(VkDevice,VkSwapchainKHR);
 VkImageLayout sourceLayout(VkDevice,VkImage,VkImageLayout);
 bool nativeProbeEnabled();

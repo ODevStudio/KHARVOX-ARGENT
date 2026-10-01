@@ -995,7 +995,7 @@ bool sourceSwapchain(VkDevice d,VkSwapchainKHR chain){return sourceRingActive(d)
 VkResult createSourceSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* output){return state(d)->sources->create(info,output);}
 VkResult sourceImages(VkDevice d,VkSwapchainKHR chain,uint32_t* count,VkImage* images){return state(d)->sources->enumerate(chain,count,images);}
 VkResult acquireSource(VkDevice d,VkSwapchainKHR chain,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* index){return state(d)->sources->acquire(chain,timeout,sem,fence,index);}
-VkResult presentSource(VkDevice d,VkQueue queue,const VkPresentInfoKHR& info,bool consumed){return state(d)->sources->present(queue,info,consumed);}
+VkResult presentSource(VkDevice d,VkQueue queue,const VkPresentInfoKHR& info,bool consumed,bool sourceComplete){return state(d)->sources->present(queue,info,consumed,sourceComplete);}
 void destroySourceSwapchain(VkDevice d,VkSwapchainKHR chain){if(state(d)->sources->destroy(chain)!=VK_SUCCESS)commandFailure("SFS source destruction retirement failed");}
 VkImageLayout sourceLayout(VkDevice d,VkImage image,VkImageLayout layout){
     if(layout!=VK_IMAGE_LAYOUT_PRESENT_SRC_KHR||!sourceRingActive(d))return layout;

@@ -563,7 +563,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
         const bool sfsVrPresent=s->sfs&&argent::sfs::vrEnabled();
         const bool sourcePresent=argent::sfs::sourceSwapchain(s->device,p->pSwapchains[0]);
         if(known&&sfsVrPresent){
-          argent::sfs::StereoFrame pair;
+          argent::sfs::StereoFrame pair;bool sourceComplete=false;
           static std::atomic<uint64_t> sfsPairMiss{},sfsPresentMiss{};
           const bool pairReady=p->pImageIndices[0]<source.images.size()&&argent::sfs::pair(s->device,source.images[p->pImageIndices[0]],source.extent,source.format,pair);
           if(pairReady){
@@ -575,7 +575,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
                   mirror->second->present(*s,eye,q,argent::DesktopMirrorPacing::Clock::now(),extent,layout,true);
                 }catch(const std::exception& e){argent::log(e.what());}
               };
-            consumed=argent::presentStereoFrame(*s,pair,p->waitSemaphoreCount,p->pWaitSemaphores,finalMirror);
+            const auto handoff=argent::presentStereoFrame(*s,pair,p->waitSemaphoreCount,p->pWaitSemaphores,finalMirror);
+            consumed=handoff.waitsConsumed;sourceComplete=handoff.sourceComplete;
             if(!consumed){auto n=++sfsPresentMiss;if(n<=8||(argent::extendedLogging()&&n%120==0))argent::log("SFS_PRESENT_NOT_CONSUMED count="+std::to_string(n)+" image="+std::to_string(p->pImageIndices[0])+" sourcePresent="+std::to_string(sourcePresent));}
           }else{
             auto n=++sfsPairMiss;if(n<=8||(argent::extendedLogging()&&n%120==0))argent::log("SFS_PRESENT_NO_PAIR count="+std::to_string(n)+" image="+std::to_string(p->pImageIndices[0])+" images="+std::to_string(source.images.size())+" extent="+std::to_string(source.extent.width)+"x"+std::to_string(source.extent.height));
@@ -583,7 +584,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
           }
           if(consumed)argent::readbackStereoIfRequested(*s,source.images[p->pImageIndices[0]],source.extent,source.format);
           if(sourcePresent){
-            VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::presentSource(s->device,q,*p,consumed);}
+            VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::presentSource(s->device,q,*p,consumed,sourceComplete);}
             argent::sfs::copyCompleted(s->device);argent::trace::present();auto n=++presents;
             if(n==1||(argent::extendedLogging()&&n%120==0))argent::log("SFS_GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed));return r;
           }

@@ -140,19 +140,23 @@ public:
         if(result!=VK_SUCCESS)return result;
         slot.acquired=true;chain.cursor=(selected+1)%chain.count;*index=selected;return VK_SUCCESS;
     }
-    VkResult present(VkQueue queue,const VkPresentInfoKHR& info,bool waitsConsumed) {
+    VkResult present(VkQueue queue,const VkPresentInfoKHR& info,bool waitsConsumed,bool sourceComplete=false) {
         std::lock_guard<std::mutex> lock(mutex_);
         if(info.swapchainCount!=1||!info.pSwapchains||!info.pImageIndices)return VK_ERROR_FEATURE_NOT_PRESENT;
         auto found=chains_.find(info.pSwapchains[0]);
         if(found==chains_.end()||info.pImageIndices[0]>=found->second->count)return VK_ERROR_OUT_OF_DATE_KHR;
         auto& slot=found->second->slots[info.pImageIndices[0]];
         if(!slot.acquired)return VK_ERROR_INITIALIZATION_FAILED;
-        auto result=vkResetFences(device_,1,&slot.retired);
-        if(result!=VK_SUCCESS)return result;
-        std::vector<VkPipelineStageFlags> stages(waitsConsumed?0:info.waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-        VkSubmitInfo retire{VK_STRUCTURE_TYPE_SUBMIT_INFO};retire.waitSemaphoreCount=uint32_t(stages.size());retire.pWaitSemaphores=stages.empty()?nullptr:info.pWaitSemaphores;retire.pWaitDstStageMask=stages.data();
-        result=submit(queue,retire,slot.retired);
-        if(result==VK_SUCCESS){slot.pending=true;slot.acquired=false;available_.notify_one();}
+        const bool completed=waitsConsumed&&sourceComplete;
+        VkResult result=VK_SUCCESS;
+        if(!completed){
+            result=vkResetFences(device_,1,&slot.retired);
+            if(result!=VK_SUCCESS)return result;
+            std::vector<VkPipelineStageFlags> stages(waitsConsumed?0:info.waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+            VkSubmitInfo retire{VK_STRUCTURE_TYPE_SUBMIT_INFO};retire.waitSemaphoreCount=uint32_t(stages.size());retire.pWaitSemaphores=stages.empty()?nullptr:info.pWaitSemaphores;retire.pWaitDstStageMask=stages.data();
+            result=submit(queue,retire,slot.retired);
+        }
+        if(result==VK_SUCCESS){slot.pending=!completed;slot.acquired=false;available_.notify_one();}
         if(info.pResults)info.pResults[0]=result;
         return result;
     }

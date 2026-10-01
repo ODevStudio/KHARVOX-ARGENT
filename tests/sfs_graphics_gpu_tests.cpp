@@ -195,7 +195,7 @@ int main(int argc,char** argv){try{
   VkResult create(const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* out){return argent::sfs::createSourceSwapchain(device,info,out);}
   VkResult enumerate(VkSwapchainKHR c,uint32_t* n,VkImage* images){auto r=argent::sfs::sourceImages(device,c,n,images);if(r==VK_SUCCESS&&images)argent::sfs::swapchainImages(device,c,*n,images);return r;}
   VkResult acquire(VkSwapchainKHR c,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* index){return argent::sfs::acquireSource(device,c,timeout,sem,fence,index);}
-  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed){return argent::sfs::presentSource(device,q,info,consumed);}
+  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed,bool sourceComplete=false){return argent::sfs::presentSource(device,q,info,consumed,sourceComplete);}
   VkResult destroy(VkSwapchainKHR c){argent::sfs::swapchainDestroyed(device,c);argent::sfs::destroySourceSwapchain(device,c);return VK_SUCCESS;}
  } ring{device};
  DEVICE(vkCreateImageView);DEVICE(vkDestroyImageView);DEVICE(vkCreateRenderPass);DEVICE(vkDestroyRenderPass);DEVICE(vkCreateFramebuffer);DEVICE(vkDestroyFramebuffer);DEVICE(vkCmdBeginRenderPass);DEVICE(vkCmdEndRenderPass);
@@ -358,7 +358,7 @@ int main(int argc,char** argv){try{
 #endif
  VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore acquired{},rendered{};ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&acquired));ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&rendered));
  VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence completed{},acquireFence{};ok(vkCreateFence(device,&fenceInfo,nullptr,&completed));ok(vkCreateFence(device,&fenceInfo,nullptr,&acquireFence));
- auto present=[&](uint32_t index,bool consumed,uint32_t waits){VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;ok(ring.present(queue,info,consumed));ok(perImage);};
+ auto present=[&](uint32_t index,bool consumed,uint32_t waits,bool sourceComplete=false){VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;ok(ring.present(queue,info,consumed,sourceComplete));ok(perImage);};
  VkPhysicalDeviceProperties timingProperties{};vkGetPhysicalDeviceProperties(physical,&timingProperties);
  kharvox::CopyGpuTiming timing;timing.initialize(device,vkGetDeviceProcAddr,timingProperties.limits.timestampPeriod,families[family].timestampValidBits);
  check(timing.pool!=VK_NULL_HANDLE,"GPU timestamp initialization failed");
@@ -496,10 +496,13 @@ int main(int argc,char** argv){try{
 #endif
 #ifdef ARGENT_TEST_OPENXR
   argent::sfs::StereoFrame submittedPair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,submittedPair),"No stereo frame for XR");
-  check(argent::presentStereoFrame(xrDevice,submittedPair,1,&rendered),"XR did not consume completed stereo pair");present(index,true,1);
+  const auto handoff=argent::presentStereoFrame(xrDevice,submittedPair,1,&rendered);
+  check(handoff.waitsConsumed&&handoff.sourceComplete,"XR did not complete stereo pair");present(index,handoff.waitsConsumed,1,handoff.sourceComplete);
 #else
-  if(frame%2){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,VK_NULL_HANDLE));}
-  present(index,frame%2,1);
+  const bool sourceComplete=frame%4==3;
+  if(frame%2){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,sourceComplete?completed:VK_NULL_HANDLE));}
+  if(sourceComplete){ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));}
+  present(index,frame%2,1,sourceComplete);
 #endif
   VkSubmitInfo finish{VK_STRUCTURE_TYPE_SUBMIT_INFO};ok(vkQueueSubmit(queue,1,&finish,completed));ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));
   double gpuMs{};check(timing.completed(gpuMs)&&std::isfinite(gpuMs)&&gpuMs>=0,"GPU timestamps unavailable after completion");check(!timing.completed(gpuMs),"GPU timestamp sample reused");

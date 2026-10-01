@@ -112,7 +112,7 @@ bool beginStereoImpl(Device& d,const Source& source,sfs::FramePose& pose,XrPosef
         try{cancelStereoImpl();}catch(...){}failed=true;return false;
     }
 }
-bool presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uint32_t waitCount,const VkSemaphore* waits,const StereoMirror& mirror){
+StereoPresentResult presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uint32_t waitCount,const VkSemaphore* waits,const StereoMirror& mirror){
     std::lock_guard<std::recursive_mutex> guard(mutex);
     // KHARVOX keeps borrowed game depth alive through submission and its fence.
     kharvox::GameImageLifetime::Use gameImages(kharvox::gameImageLifetime());
@@ -120,10 +120,10 @@ bool presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uint32_t waitCount
     std::array<uint32_t,2> targets{};
     std::array<bool,2> acquired{},waited{};
     try{
-        if(failed||!stereoPending.begun)return false;
+        if(failed||!stereoPending.begun)return {};
         if(boundDevice!=d.device||swapchainLayers!=2||!stereoEyes[0].handle||!stereoEyes[1].handle||
            !validStereoPair(pair,stereoPending.pose,sourceExtent,format)){
-            log("STEREO_PAIR_REJECTED stale/mixed frame, eye, extent, format or pose");cancelStereoImpl();return false;
+            log("STEREO_PAIR_REJECTED stale/mixed frame, eye, extent, format or pose");cancelStereoImpl();return {};
         }
         const bool earlyRelease=!mirror&&kharvox::sfsEarlyXrRelease(earlyStereoReleaseRequested(pair.generation),runtimeKind,
             sfs::sourceRingActive(d.device),boundQueue==d.graphicsQueue&&boundDevice==d.device,
@@ -283,14 +283,14 @@ bool presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uint32_t waitCount
         }
         try{cancelStereoImpl();}catch(...){}failed=true;
     }
-    return consumed;
+    return {consumed,submitted&&complete};
 }
 }
 bool beginStereoFrame(Device& d,const Source& source,sfs::FramePose& pose,XrPosef& head,bool quadView,
                       const sfs::Matrix* cinematicProjection,sfs::EyeUniforms* cinematicUniforms){
     auto begin=[&]{return beginStereoImpl(d,source,pose,head,quadView,cinematicProjection,cinematicUniforms);};return simulator?xrWorker().invoke(begin):begin();
 }
-bool presentStereoFrame(Device& d,const sfs::StereoFrame& pair,uint32_t n,const VkSemaphore* waits,const StereoMirror& mirror){
+StereoPresentResult presentStereoFrame(Device& d,const sfs::StereoFrame& pair,uint32_t n,const VkSemaphore* waits,const StereoMirror& mirror){
     auto present=[&]{return presentStereoImpl(d,pair,n,waits,mirror);};return simulator?xrWorker().invoke(present):present();
 }
 void cancelStereoFrame(){auto cancel=[] {std::lock_guard<std::recursive_mutex> guard(mutex);cancelStereoImpl();};if(simulator)xrWorker().invoke(cancel);else cancel();}
