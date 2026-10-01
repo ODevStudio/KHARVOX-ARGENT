@@ -4,6 +4,18 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+static PFN_vkCreateFramebuffer createFramebuffer{};
+static PFN_vkDestroyFramebuffer destroyFramebuffer{};
+static unsigned framebuffersCreated{},framebuffersDestroyed{};
+static VkResult VKAPI_CALL countedCreateFramebuffer(VkDevice device,const VkFramebufferCreateInfo* info,
+    const VkAllocationCallbacks* allocator,VkFramebuffer* framebuffer){
+    const auto result=createFramebuffer(device,info,allocator,framebuffer);
+    if(result==VK_SUCCESS)++framebuffersCreated;
+    return result;
+}
+static void VKAPI_CALL countedDestroyFramebuffer(VkDevice device,VkFramebuffer framebuffer,const VkAllocationCallbacks* allocator){
+    ++framebuffersDestroyed;destroyFramebuffer(device,framebuffer,allocator);
+}
 static void check(bool v,const char* reason){if(!v)throw std::runtime_error(reason);}
 static void ok(VkResult r){check(r==VK_SUCCESS,"Vulkan operation failed");}
 int main(int argc,char**argv){try{
@@ -146,6 +158,8 @@ const bool separateEyes=argc==3;
     auto transition=[&](VkImageLayout old,VkImageLayout next){for(unsigned e=0;e<(separateEyes?2u:1u);++e){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.oldLayout=old;b.newLayout=next;b.srcAccessMask=old==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=colors[e];b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,ci.arrayLayers};vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);}};
     using namespace kharvox::hands;
     HandRenderer renderer;
+    createFramebuffer=dispatch.createFramebuffer;dispatch.createFramebuffer=countedCreateFramebuffer;
+    destroyFramebuffer=dispatch.destroyFramebuffer;dispatch.destroyFramebuffer=countedDestroyFramebuffer;
     std::array<std::vector<VkImage>,2> images{{{image},{rightImage}}};
     check(renderer.initialize(physical,device,queue,family,dispatch,ci.format,{{{width,height},{width,height}}},images,std::filesystem::path(argv[1]).wstring(),[](const std::string&s){std::cout<<s<<'\n';},!separateEyes),"Hand initialization failed");
     auto available=renderer.availability();check(available.leftFist&&available.rightFist&&available.leftGun&&available.rightGun,"One or more models failed to load");
@@ -236,8 +250,10 @@ const bool separateEyes=argc==3;
         }
         vkUnmapMemory(device,host);std::cout<<"frame "<<frame<<" changed="<<changed[0]<<","<<changed[1]<<'\n';
         renderer.finishSceneIntegratedFrame();
+        if(frame>=18)check(framebuffersCreated==6&&framebuffersDestroyed==2,"Stable scene framebuffers were recreated or destroyed per frame");
         check(partialMask||(occluded||hudMask?changed[eye]==0:changed[eye]>(laserOnly?0:20)),"Hand/laser visibility/HUD protection failed");check(changed[1-eye]==0,"Hand/laser leaked into other array eye");check(changed[eye]<width*height/2,"Hand overwrote background");
     }
     renderer.shutdown();if(separateEyes){vkDestroyImage(device,rightImage,nullptr);vkFreeMemory(device,rightMemory,nullptr);}dispatch.destroyImageView(device,depthView,nullptr);dispatch.destroyImage(device,depthImage,nullptr);dispatch.freeMemory(device,depthMemory,nullptr);vkDestroyImage(device,image,nullptr);vkFreeMemory(device,imageMemory,nullptr);vkDestroyBuffer(device,readback,nullptr);vkFreeMemory(device,host,nullptr);vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);vkDestroyInstance(instance,nullptr);FreeLibrary(loader);
+    check(framebuffersCreated==framebuffersDestroyed,"Framebuffer cache leaked during shutdown");
     std::cout<<"PASS: fist and gun hands, both array eyes, background preserved\n";return 0;
 }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

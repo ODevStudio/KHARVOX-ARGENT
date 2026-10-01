@@ -3,6 +3,7 @@
 #include "HandCalibrationPolicy.h"
 #include "CalibrationDraft.h"
 #include "HandDispatch.h"
+#include "HandSceneFramebuffers.h"
 #include "HandHudMaskSpv.h"
 #include "HandHudPlaceholderSpv.h"
 #include <windows.h>
@@ -110,6 +111,7 @@ struct HandRenderer::Impl {
     VkShaderModule hudPlaceholderShader{};
     VkCommandPool uploadPool{};VkCommandBuffer uploadCommand{};VkSampler sampler{};VkDescriptorSetLayout descriptorLayout{};VkDescriptorPool descriptorPool{};VkPipelineLayout pipelineLayout{};VkPipeline pipeline{};VkRenderPass renderPass{};VkShaderModule vertexShader{},fragmentShader{};
     std::vector<ScenePipeline> scenePipelines;std::vector<VkFramebuffer> sceneFramebuffers;
+    HandSceneFramebuffers cachedSceneFramebuffers;
     struct SceneDepth {DepthTarget target;VkExtent2D extent{};VkFormat format{};bool initialized{};};
     std::vector<SceneDepth> sceneDepthCopies;size_t sceneDepthCopiesUsed{};
     std::array<std::vector<VkImageView>,2> eyeViews{};std::array<std::vector<DepthTarget>,2> depthTargets{};std::array<std::vector<VkFramebuffer>,2> framebuffers{};std::array<VkExtent2D,2> extents{};
@@ -136,6 +138,7 @@ struct HandRenderer::Impl {
     bool texture(const DecodedImage&decoded,Texture&out,bool srgb);
     bool depthTarget(VkExtent2D extent,DepthTarget&out,VkFormat depthFormat=VK_FORMAT_D32_SFLOAT,bool transfer=false);
     void destroyDepth(DepthTarget& target){
+        if(target.view)cachedSceneFramebuffers.retireDepthAfterCompletion(device,vk,target.view);
         if(target.view)vk.destroyImageView(device,target.view,nullptr);
         if(target.image)vk.destroyImage(device,target.image,nullptr);
         if(target.memory)vk.freeMemory(device,target.memory,nullptr);
@@ -773,6 +776,7 @@ void HandRenderer::shutdown() {
     return;
   if (impl_->queue && impl_->vk.queueWaitIdle)
     impl_->vk.queueWaitIdle(impl_->queue);
+  impl_->cachedSceneFramebuffers.clearAfterCompletion(impl_->device,impl_->vk);
   for(auto framebuffer:impl_->sceneFramebuffers)
     if(framebuffer)impl_->vk.destroyFramebuffer(impl_->device,framebuffer,nullptr);
   for(auto& copy:impl_->sceneDepthCopies)impl_->destroyDepth(copy.target);
@@ -898,8 +902,6 @@ bool HandRenderer::recordSceneIntegrated(VkCommandBuffer commandBuffer,
         privateDepth=&impl_->sceneDepthCopies[slot];
         if(privateDepth->format!=target.depthFormat||privateDepth->extent.width!=target.extent.width
             ||privateDepth->extent.height!=target.extent.height){
-            // This slot is reused only after finishSceneIntegratedFrame, which
-            // follows the owner fence and destroys all borrowing framebuffers.
             impl_->destroyDepth(privateDepth->target);*privateDepth={};
         }
         if(!privateDepth->target.view){
@@ -917,9 +919,16 @@ bool HandRenderer::recordSceneIntegrated(VkCommandBuffer commandBuffer,
     framebufferInfo.pAttachments=attachments.data();framebufferInfo.width=target.extent.width;
     framebufferInfo.height=target.extent.height;framebufferInfo.layers=1;
     VkFramebuffer framebuffer{};
-    if(impl_->vk.createFramebuffer(impl_->device,&framebufferInfo,nullptr,&framebuffer)!=VK_SUCCESS)
-        return false;
-    impl_->sceneFramebuffers.push_back(framebuffer);
+    const bool ownedColor=std::any_of(impl_->eyeViews.begin(),impl_->eyeViews.end(),[&](const auto& views){
+        return std::find(views.begin(),views.end(),target.colorView)!=views.end();
+    });
+    if(privateDepth&&ownedColor){
+        framebuffer=impl_->cachedSceneFramebuffers.get(impl_->device,impl_->vk,framebufferInfo);
+        if(!framebuffer)return false;
+    }else{
+        if(impl_->vk.createFramebuffer(impl_->device,&framebufferInfo,nullptr,&framebuffer)!=VK_SUCCESS)return false;
+        impl_->sceneFramebuffers.push_back(framebuffer);
+    }
     if(privateDepth){
         copyHandSceneDepth(impl_->vk,commandBuffer,target.depthImage,privateDepth->target.image,
             target.extent,handSceneDepthAspect(target.depthFormat),privateDepth->initialized,target.depthArrayLayer,target.depthExtent,target.depthOffset);
