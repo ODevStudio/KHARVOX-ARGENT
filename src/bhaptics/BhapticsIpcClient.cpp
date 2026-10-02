@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 
 #include "BhapticsIpcProtocol.h"
@@ -19,6 +21,7 @@ std::atomic<std::uint32_t> currentRumble{};
 std::atomic<std::uint32_t> pendingRumblePeak{};
 std::atomic<HANDLE> stopEvent{};
 HANDLE workerHandle{};
+std::mutex workerMutex;
 std::wstring pipePath;
 std::string sessionToken;
 
@@ -142,21 +145,38 @@ DWORD WINAPI workerMain(void*) {
         CloseHandle(pipe);
     }
 
-    currentRumble.store(0, std::memory_order_release);
-    pendingRumblePeak.store(0, std::memory_order_release);
-    workerStarted.store(false, std::memory_order_release);
-    if (const HANDLE event = stopEvent.exchange(nullptr, std::memory_order_acq_rel))
-        CloseHandle(event);
+    {
+        const std::lock_guard<std::mutex> lock(workerMutex);
+        currentRumble.store(0, std::memory_order_release);
+        pendingRumblePeak.store(0, std::memory_order_release);
+        if (const HANDLE event = stopEvent.exchange(nullptr, std::memory_order_acq_rel))
+            CloseHandle(event);
+        CloseHandle(workerHandle);
+        workerHandle = nullptr;
+        workerStarted.store(false, std::memory_order_release);
+    }
     return 0;
 }
 
 } // namespace
 
 void KharvoxBhapticsIpcStart() {
-    bool expected = false;
-    if (!workerStarted.compare_exchange_strong(expected, true,
-            std::memory_order_acq_rel))
-        return;
+    std::unique_lock<std::mutex> lock(workerMutex);
+    while (workerStarted.load(std::memory_order_acquire)
+        && stopRequested.load(std::memory_order_acquire)) {
+        HANDLE retiring{};
+        if (!DuplicateHandle(GetCurrentProcess(), workerHandle, GetCurrentProcess(),
+                &retiring, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+        lock.unlock();
+        const DWORD wait = WaitForSingleObject(retiring, INFINITE);
+        CloseHandle(retiring);
+        if (wait != WAIT_OBJECT_0) {
+            RaiseFailFastException(nullptr, nullptr, 0);
+            std::abort();
+        }
+        lock.lock();
+    }
+    if (workerStarted.load(std::memory_order_acquire)) return;
 
     const auto pipeName = readEnvironment(L"KHARVOX_BHAPTICS_PIPE_NAME", 128);
     const auto tokenWide = readEnvironment(L"KHARVOX_BHAPTICS_SESSION_TOKEN",
@@ -188,6 +208,7 @@ void KharvoxBhapticsIpcStart() {
         workerStarted.store(false, std::memory_order_release);
         return;
     }
+    workerStarted.store(true, std::memory_order_release);
     workerHandle = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
     if (!workerHandle) {
         CloseHandle(event);
@@ -195,10 +216,6 @@ void KharvoxBhapticsIpcStart() {
         workerStarted.store(false, std::memory_order_release);
         return;
     }
-    // The worker owns its lifetime until process shutdown. Closing this handle
-    // avoids a kernel-handle leak without blocking the Vulkan/OpenXR thread.
-    CloseHandle(workerHandle);
-    workerHandle = nullptr;
 }
 
 void KharvoxBhapticsSubmitRumble(
@@ -219,6 +236,7 @@ void KharvoxBhapticsSubmitRumble(
 }
 
 void KharvoxBhapticsIpcRequestStop() {
+    const std::lock_guard<std::mutex> lock(workerMutex);
     if (!workerStarted.load(std::memory_order_acquire))
         return;
     stopRequested.store(true, std::memory_order_release);

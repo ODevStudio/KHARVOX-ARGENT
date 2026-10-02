@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 
 #include "Psvr2IpcProtocol.h"
@@ -17,6 +19,8 @@ std::atomic<bool> stopRequested{};
 std::atomic<std::uint64_t> desiredCommand{};
 std::atomic<std::uint64_t> desiredGeneration{};
 std::atomic<HANDLE> stopEvent{};
+HANDLE workerHandle{};
+std::mutex workerMutex;
 std::wstring pipePath;
 std::string sessionToken;
 
@@ -131,20 +135,37 @@ DWORD WINAPI workerMain(void*) {
         CloseHandle(pipe);
     }
 
-    workerStarted.store(false, std::memory_order_release);
-    if (const HANDLE event = stopEvent.exchange(nullptr,
-            std::memory_order_acq_rel))
-        CloseHandle(event);
+    {
+        const std::lock_guard<std::mutex> lock(workerMutex);
+        if (const HANDLE event = stopEvent.exchange(nullptr,
+                std::memory_order_acq_rel))
+            CloseHandle(event);
+        CloseHandle(workerHandle);
+        workerHandle = nullptr;
+        workerStarted.store(false, std::memory_order_release);
+    }
     return 0;
 }
 
 } // namespace
 
 void KharvoxPsvr2IpcStart() {
-    bool expected = false;
-    if (!workerStarted.compare_exchange_strong(expected, true,
-            std::memory_order_acq_rel))
-        return;
+    std::unique_lock<std::mutex> lock(workerMutex);
+    while (workerStarted.load(std::memory_order_acquire)
+        && stopRequested.load(std::memory_order_acquire)) {
+        HANDLE retiring{};
+        if (!DuplicateHandle(GetCurrentProcess(), workerHandle, GetCurrentProcess(),
+                &retiring, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;
+        lock.unlock();
+        const DWORD wait = WaitForSingleObject(retiring, INFINITE);
+        CloseHandle(retiring);
+        if (wait != WAIT_OBJECT_0) {
+            RaiseFailFastException(nullptr, nullptr, 0);
+            std::abort();
+        }
+        lock.lock();
+    }
+    if (workerStarted.load(std::memory_order_acquire)) return;
     if (!requested()) {
         workerStarted.store(false, std::memory_order_release);
         return;
@@ -186,14 +207,14 @@ void KharvoxPsvr2IpcStart() {
         workerStarted.store(false, std::memory_order_release);
         return;
     }
-    const HANDLE worker = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
-    if (!worker) {
+    workerStarted.store(true, std::memory_order_release);
+    workerHandle = CreateThread(nullptr, 0, workerMain, nullptr, 0, nullptr);
+    if (!workerHandle) {
         CloseHandle(event);
         stopEvent.store(nullptr, std::memory_order_release);
         workerStarted.store(false, std::memory_order_release);
         return;
     }
-    CloseHandle(worker);
 }
 
 void KharvoxPsvr2SubmitTrigger(
@@ -207,6 +228,7 @@ void KharvoxPsvr2SubmitTrigger(
 }
 
 void KharvoxPsvr2IpcRequestStop() {
+    const std::lock_guard<std::mutex> lock(workerMutex);
     if (!workerStarted.load(std::memory_order_acquire)) return;
     stopRequested.store(true, std::memory_order_release);
     if (const HANDLE event = stopEvent.load(std::memory_order_acquire))
