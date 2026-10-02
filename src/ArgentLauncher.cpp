@@ -16,6 +16,7 @@
 #include <fstream>
 #include <string>
 #include "LauncherSettings.h"
+#include "LauncherProbeOutput.h"
 #include "MouseSession.h"
 #include "BuildFeatures.h"
 #include "RenderResolution.h"
@@ -182,8 +183,11 @@ std::wstring timestampName() {
 std::wstring processOutput(const std::filesystem::path& exe, const std::map<std::wstring,std::wstring>& env) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE read{}, write{};
-    if (!CreatePipe(&read, &write, &sa, 0)) return L"";
-    SetHandleInformation(read, HANDLE_FLAG_INHERIT, 0);
+    if (!CreatePipe(&read, &write, &sa, 0)) return L"PROBE_START_FAILED win32="+std::to_wstring(GetLastError())+L"\n";
+    if(!SetHandleInformation(read,HANDLE_FLAG_INHERIT,0)){
+        const auto error=GetLastError();CloseHandle(read);CloseHandle(write);
+        return L"PROBE_START_FAILED win32="+std::to_wstring(error)+L"\n";
+    }
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -214,18 +218,15 @@ std::wstring processOutput(const std::filesystem::path& exe, const std::map<std:
     BOOL ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
         environment.data(), root.c_str(), &si, &pi);
+    const auto startError=ok?ERROR_SUCCESS:GetLastError();
     CloseHandle(write);
     std::wstring output;
     if (ok) {
-        char buffer[1024];
-        DWORD readBytes{};
-        while (ReadFile(read, buffer, sizeof(buffer), &readBytes, nullptr) && readBytes)
-            output.append(buffer, buffer + readBytes);
-        WaitForSingleObject(pi.hProcess, 15000);
+        output=argent::launcher::collectProbeOutput(pi.hProcess,read);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     } else {
-        output = L"PROBE_START_FAILED win32=" + std::to_wstring(GetLastError()) + L"\n";
+        output = L"PROBE_START_FAILED win32=" + std::to_wstring(startError) + L"\n";
     }
     CloseHandle(read);
     return output;
@@ -779,6 +780,9 @@ void runLauncher(bool launch) {
     setStatus(launch ? L"Checking runtime and starting DOOM Eternal..." : L"Checking Vulkan, OpenXR and headset...");
     auto probe = processOutput(runtime / L"ArgentRuntimeProbe.exe", probeEnv);
     if (log) log << probe << L"\n";
+    if(containsLine(probe,L"PROBE_START_FAILED")||containsLine(probe,L"PROBE_CAPTURE_FAILED")){
+        fail(L"Runtime probe failed or timed out. DOOM was not started.");return;
+    }
     if (!launch && mode == 1 && !containsLine(probe, L"XR_EYE0_RECOMMENDED=")) { fail(L"VR diagnostics failed. Connect the headset and start its OpenXR runtime."); return; }
     if (!launch) { setStatus(L"Runtime check complete. See Development logs."); return; }
     if (steamVr) ensureSteamVrArgentSettings(log);
