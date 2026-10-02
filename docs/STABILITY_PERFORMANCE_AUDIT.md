@@ -25,7 +25,7 @@ and record them here after each subsystem.
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-`7b3c206`, `2a66aeb`, `fea8723`, and `d529efe`.
+`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, and `d6589a1`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -38,7 +38,7 @@ payloads still retire GPU use before overwriting the single buffer.
 
 | Subsystem | Status | Evidence and disposition |
 | --- | --- | --- |
-| Startup, launcher, device/runtime negotiation | Probe hang, session dispatch crashes and diagnostic ownership loss fixed; broader review in progress | Four real probe subprocess scenarios, fifty-eight session/swapchain scenarios and fifty-eight Vulkan-creation scenarios pass. Missing GPU-verification dispatch rejects setup before resource creation; unavailable optional timing dispatch leaves setup usable. Partial session resources retire through existing shutdown. Vulkan creation preserves successful handles and clears temporary callbacks despite diagnostic exceptions. Broader negotiation, complete GUI launch and native runtime startup remain to verify. |
+| Startup, launcher, device/runtime negotiation | Startup failures fixed; broader negotiation in progress | Four real probe subprocess scenarios, eighty-three startup/extension scenarios, fifty-eight session/swapchain scenarios and fifty-eight Vulkan-creation scenarios pass. Initialization publishes failure before guarded diagnostics; valid extension lists survive optional logging failures. Missing GPU-verification dispatch rejects setup before resource creation; partial session resources retire through existing shutdown. Vulkan creation preserves successful handles and clears temporary callbacks despite diagnostic exceptions. Outer layer registration, complete GUI launch and native runtime startup remain to verify. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
@@ -47,7 +47,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC ownership and controller teardown exceptions fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Controller cleanup now reaches both IPC stop requests and input clearing despite optional shutdown failures. Eight original controller regressions fail; twenty fixed lifecycle scenarios and native IPC restart checks pass. State restoration, broader input, per-frame work and complete unload remain to inspect. |
-| Build, test, packaging, and end-to-end verification | Focused build/tests pass; package and native verification pending | All fifty focused checks pass in 35.57 seconds. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
+| Build, test, packaging, and end-to-end verification | Focused build/tests pass; package and native verification pending | All fifty-one focused checks pass in 35.97 seconds. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
 
 ## New Audit Commits
 
@@ -74,8 +74,39 @@ payloads still retire GPU use before overwriting the single buffer.
 | `cb974b5` | Startup / XR session creation | Stability | Check selected and downstream Vulkan dispatch before UUID verification; skip optional timing when queue-property dispatch is unavailable. Four original cases exit with access violation. Twenty-six production setup/shutdown scenarios and five related checks pass; the layer compiles. |
 | `4f9f6b3` | OpenXR composition swapchain ownership | Stability | Verification-only: exercise production creation/destruction through session shutdown, partial eye failures, cache reuse and recreation. Thirty-two added swapchain scenarios pass; frame fixtures confirm terminal failure isolation. Production extraction is identical, with no runtime behavior change. The full forty-nine-check suite passes. |
 | `acd44d3` | Startup / Vulkan runtime creation | Stability | Guard optional creation, callback and binding diagnostics so successful native handles and resolved procedures survive logging exceptions. Genuine creation exceptions clear outputs, publish initialization failure and finish temporary callback cleanup. Seventeen original regressions fail; all fifty-eight production-function scenarios and the full fifty-check suite pass. |
+| `0394b04` | Startup / OpenXR initialization and extension negotiation | Stability | Isolate optional startup and per-extension diagnostics; publish failure before guarded error logging. Catch outer manifest/worker exceptions and prevent cached partial initialization from reporting success. Twenty-six original regressions fail; all eighty-three production-function scenarios and the full fifty-one-check suite pass. |
 
 ## Subsystem Evidence
+
+### OpenXR Initialization and Extensions
+
+The original production functions failed twenty-six of eighty-three scenarios.
+Optional path, identity, completion and worker diagnostics could abort usable
+startup. Failure diagnostics could escape before `failed` changed, leaving a
+created instance eligible for a cached success despite incomplete initialization.
+The outer manifest classification also escaped without recording an attempt.
+Per-extension logging could truncate a valid extension list and disable XR.
+
+The fix guards optional diagnostics, including message construction, and records
+failure before error logging. The outer wrapper catches manifest and worker-call
+exceptions and records failure under the existing state mutex. Failed queries return an
+empty list; optional logging failures preserve both parsed extension names.
+Loader search flags, runtime path selection, application identity, Steam/VDXR
+worker routing and the force-enable1 compatibility setting stay unchanged.
+This startup fix adds no per-frame work or measured FPS benefit.
+
+The fixture includes `XrStartup.inc` and runs Steam-backed initialization on the
+production `XrWorker`. All eighty-three scenarios pass, including five runtime
+classifications, enable1/enable2 availability, compatibility overrides, missing
+loader/export, extension enumeration, manifest failures, native setup errors,
+throwing diagnostics and legacy-extension gates. Cached calls neither retry
+failed setup nor accept partial initialization. The full focused build succeeds;
+the raw verbose suite passes all fifty-one checks in 35.97 seconds.
+
+The fixture simulates loader/export lookup, manifests and XR calls. It exercises
+the wrapper's manifest exception boundary but does not inject worker thread or
+queue allocation failure. Native loader procedure caching, malformed extension
+responses, the outer Vulkan entry points and headset startup remain unverified.
 
 ### Vulkan Runtime Creation
 
@@ -691,14 +722,14 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 
 The latest focused harness build compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
 SFS, hand rendering, FSR, the launcher and all four IPC translation units.
-With the Vulkan creation fix `acd44d3`, the full raw verbose CTest run
-passes all 50 checks in 35.57 seconds. Coverage includes queue concurrency, GPU-backed shader/rendering checks,
+With the startup/extension fix `0394b04`, the full raw verbose CTest run
+passes all 51 checks in 35.97 seconds. Coverage includes queue concurrency, GPU-backed shader/rendering checks,
 GPU lifetime gates, readback/pause upload, launcher subprocesses, IPC cancellation
 and worker ownership, controller action lifecycle, stereo begin/present,
 flat/prepared presentation, session events, partial session/swapchain creation
 and shutdown diagnostics. Earlier full snapshots passed 28 checks in 35.38
-seconds, 44 in 35.17 seconds, 47 in 35.60 seconds, 48 in 39.58 seconds and 49
-in 35.96 seconds.
+seconds, 44 in 35.17 seconds, 47 in 35.60 seconds, 48 in 39.58 seconds, 49
+in 35.96 seconds and 50 in 35.57 seconds.
 The rebuilt flat/preparation/event target also passes all 115
 scenarios after tightening its failed-end ownership assertion.
 After `cb974b5`, the new twenty-six-scenario session-creation target and five
@@ -715,5 +746,6 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
-input/integrations and diagnostics. No full-audit completion is claimed.
+Next audit stage: outer Vulkan creation/registration and runtime feature-chain
+mediation, broader SFS shader variants, HUD/game hooks, input/integrations and
+diagnostics. No full-audit completion is claimed.
