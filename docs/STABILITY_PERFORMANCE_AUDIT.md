@@ -22,6 +22,9 @@ and record them here after each subsystem.
 | `12c9714` | SFS frame publication | Performance | Skip uniform retirement/copy for byte-identical payloads without skipping metadata progression. |
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
+Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
+and `0d2a56d`. These record audit evidence rather than changing runtime behavior.
+
 Synthetic CPU measurements from the previous implementation work saved about
 12.3 microseconds per eligible frame in total. At a CPU-bound 100 FPS this would
 illustrate roughly 100.12 FPS, not a measured gameplay gain. FSR copy elimination
@@ -35,9 +38,9 @@ payloads still retire GPU use before overwriting the single buffer.
 | Startup, launcher, device/runtime negotiation | Pending | Inspect failure handling, trust boundaries, and required capabilities. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
-| FSR1 | GPU path reviewed; XR teardown pending | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source retirement remains part of the wider XR teardown audit. |
+| FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
 | Hand/depth rendering and HUD | Upload/shutdown retirement fixed; wider HUD review pending | Verified upload and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Four focused checks pass, including five isolated failure/device-loss scenarios and both stereo GPU layouts; wider HUD/input paths remain to inspect. |
-| OpenXR frame loop and image handoff | Pending | Inspect frame/session state, acquire/wait/release, queue/fence failures, and shutdown. |
+| OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Pending | Inspect disabled-path overhead and resource/readback lifetime. |
 | Input, camera/game hooks, and external integrations | Pending | Inspect state restoration, connection/error handling, and per-frame work. |
@@ -50,6 +53,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `aabbdb5` | Desktop mirror | Stability | Failure quarantine, verified error-path source retirement, queue-serialized destruction, and cleared handles. Failure-injection test reproduced a double-destruction on the original implementation, then passed after the fix. `ArgentLayer.cpp` compiled. |
 | `08c2ae7` | SFS source ownership and queue synchronization | Stability | Move shared queue locking into actual source-ring submissions. An exhausted acquire no longer holds the queue mutex needed by present to release a slot. Bounded concurrency regression reproduced the old entry-point lock schedule, then passed after moving the lock; five GPU checks also pass. |
 | `cbb995d` | Hand texture uploads and renderer teardown | Stability | Validate queue retirement before freeing upload staging or renderer resources; reject failed upload-command reset and missing upload dispatch functions. Isolated GPU-backed checks distinguish fail-fast retirement from unsafe destruction, and allow device-loss cleanup. Existing array-eye/separate-eye rendering and framebuffer reuse checks pass. |
+| `31aa381` | OpenXR image handoff and source/runtime teardown | Stability | Require verified queue/device retirement or device loss before dropping live GPU resource leases. Flat-copy recovery drains the device to cover cross-queue bridge work; source retirement can no longer silently fail before caller destruction. Seven bounded failure checks pass, with both layer translation units compiled. |
 
 ## Subsystem Evidence
 
@@ -154,10 +158,36 @@ be summed into an end-to-end FPS claim. No further per-frame FSR change is
 justified here. Lazy fallback texture allocation could save VRAM but would add
 descriptor/failure-path complexity without demonstrated frame-time benefit.
 
-Remaining cross-path target: `retireStereoSources` returns on a failed queue wait,
-while its layer caller continues source destruction. Verify failure propagation
-and lifetime retention during the XR teardown audit before marking that path
-complete. The compute checks above do not prove source/runtime teardown safe.
+The source-retirement finding is fixed by `31aa381`: the layer caller can continue
+source destruction only after successful queue retirement or device loss. Other
+wait errors fail fast instead of silently returning. The compute checks above
+do not prove full runtime teardown safe.
+
+### OpenXR Retirement Failures
+
+Stereo error recovery previously returned after both fence and queue waits failed,
+dropping borrowed-depth leases without verified completion. Source retirement
+likewise returned on a failed queue wait while its caller destroyed source images.
+Shutdown ignored device-idle failure, and flat-copy error cleanup could release an
+XR image while submitted copy work was still live. The shared retirement gate
+accepts success or device loss and fails fast for other errors before lifetime
+release. Device loss permits resource teardown but is not reported as successful
+source completion. Logging/allocation failure cannot unwind through the gate.
+
+Flat-copy recovery waits for the entire device, not just the XR queue: an earlier
+cross-queue bridge submission can consume the original waits before the final XR
+submission fails. Normal frame submission and wait counts remain unchanged.
+Shutdown's wait and destruction use the shared queue mutex. Error recovery retains
+XR image ownership when device loss leaves completion unverified.
+
+Fresh `gpu_retirement`, `game_image_lifetime`, and `native_xr_release` checks passed
+in 0.97 seconds. The new check launches seven bounded hidden children using real
+borrowed-image leases and concurrent retirement: success/device loss allow cleanup;
+host/device OOM, initialization failure, timeout and not-ready produce the expected
+fail-fast exit without releasing the lease. It tests the shared gate and lifetime
+primitive, not linked XR frame entry points or real driver failures. Both outer
+layer translation units compile. Session/events, partial creation and full
+headset shutdown remain outside this verification.
 
 ## Verification Limits
 
