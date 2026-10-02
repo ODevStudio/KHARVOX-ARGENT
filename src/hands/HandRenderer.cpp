@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -133,6 +134,14 @@ struct HandRenderer::Impl {
     }
 
     void say(const std::string&message)const{if(log)log("[HANDS] "+message);}
+    VkResult retireQueue()const{
+        const auto result=vk.queueWaitIdle(queue);
+        if(result!=VK_SUCCESS&&result!=VK_ERROR_DEVICE_LOST){
+            say("queue retirement failed result="+std::to_string(result));
+            RaiseFailFastException(nullptr,nullptr,0);std::terminate();
+        }
+        return result;
+    }
     std::uint32_t memoryType(std::uint32_t bits,VkMemoryPropertyFlags required)const{VkPhysicalDeviceMemoryProperties p{};vk.getPhysicalDeviceMemoryProperties(physical,&p);for(std::uint32_t i=0;i<p.memoryTypeCount;i++)if((bits&(1u<<i))&&(p.memoryTypes[i].propertyFlags&required)==required)return i;return UINT32_MAX;}
     bool buffer(VkDeviceSize size,VkBufferUsageFlags usage,const void*source,VkBuffer&out,VkDeviceMemory&memory){VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=size;bi.usage=usage;bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;if(vk.createBuffer(device,&bi,nullptr,&out)!=VK_SUCCESS)return false;VkMemoryRequirements req{};vk.getBufferMemoryRequirements(device,out,&req);const auto type=memoryType(req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);if(type==UINT32_MAX){vk.destroyBuffer(device,out,nullptr);out=VK_NULL_HANDLE;return false;}VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;if(vk.allocateMemory(device,&ai,nullptr,&memory)!=VK_SUCCESS||vk.bindBufferMemory(device,out,memory,0)!=VK_SUCCESS){if(memory)vk.freeMemory(device,memory,nullptr);vk.destroyBuffer(device,out,nullptr);memory=VK_NULL_HANDLE;out=VK_NULL_HANDLE;return false;}void*mapped{};if(vk.mapMemory(device,memory,0,size,0,&mapped)!=VK_SUCCESS){vk.freeMemory(device,memory,nullptr);vk.destroyBuffer(device,out,nullptr);memory=VK_NULL_HANDLE;out=VK_NULL_HANDLE;return false;}std::memcpy(mapped,source,static_cast<size_t>(size));vk.unmapMemory(device,memory);return true;}
     bool texture(const DecodedImage&decoded,Texture&out,bool srgb);
@@ -181,9 +190,9 @@ bool HandRenderer::Impl::texture(const DecodedImage&decoded,Texture&out,bool srg
     VkMemoryRequirements requirements{};
     if(ok){vk.getImageMemoryRequirements(device,out.image,&requirements);const auto type=memoryType(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if(type==UINT32_MAX)ok=false;else{VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=requirements.size;allocation.memoryTypeIndex=type;ok=vk.allocateMemory(device,&allocation,nullptr,&out.memory)==VK_SUCCESS&&vk.bindImageMemory(device,out.image,out.memory,0)==VK_SUCCESS;}}
     if(ok){
-        vk.resetCommandBuffer(uploadCommand,0);VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;ok=vk.beginCommandBuffer(uploadCommand,&begin)==VK_SUCCESS;
+        ok=vk.resetCommandBuffer(uploadCommand,0)==VK_SUCCESS;VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;if(ok)ok=vk.beginCommandBuffer(uploadCommand,&begin)==VK_SUCCESS;
         if(ok){VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.image=out.image;barrier.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;barrier.subresourceRange.levelCount=1;barrier.subresourceRange.layerCount=1;vk.cmdPipelineBarrier(uploadCommand,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);VkBufferImageCopy copy{};copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageSubresource.layerCount=1;copy.imageExtent={decoded.width,decoded.height,1};vk.cmdCopyBufferToImage(uploadCommand,staging,out.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;vk.cmdPipelineBarrier(uploadCommand,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);ok=vk.endCommandBuffer(uploadCommand)==VK_SUCCESS;}
-        if(ok){VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&uploadCommand;ok=vk.queueSubmit(queue,1,&submit,VK_NULL_HANDLE)==VK_SUCCESS&&vk.queueWaitIdle(queue)==VK_SUCCESS;}
+        if(ok){VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&uploadCommand;ok=vk.queueSubmit(queue,1,&submit,VK_NULL_HANDLE)==VK_SUCCESS&&retireQueue()==VK_SUCCESS;}
     }
     if(staging)vk.destroyBuffer(device,staging,nullptr);if(stagingMemory)vk.freeMemory(device,stagingMemory,nullptr);
     if(ok){VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};vi.image=out.image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D;vi.format=srgb?VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;vi.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;vi.subresourceRange.levelCount=1;vi.subresourceRange.layerCount=1;ok=vk.createImageView(device,&vi,nullptr,&out.view)==VK_SUCCESS;}
@@ -331,7 +340,9 @@ bool HandRenderer::Impl::createCommonResources(){
         ||!vk.getBufferMemoryRequirements||!vk.bindBufferMemory||!vk.mapMemory
         ||!vk.unmapMemory||!vk.cmdCopyBufferToImage||!vk.createRenderPass
         ||!vk.createGraphicsPipelines||!vk.cmdBeginRenderPass
-        ||!vk.cmdDrawIndexed||!vk.cmdDraw){say("required Vulkan functions unavailable; renderer disabled");return false;}
+        ||!vk.cmdDrawIndexed||!vk.cmdDraw||!vk.resetCommandBuffer
+        ||!vk.beginCommandBuffer||!vk.endCommandBuffer||!vk.queueSubmit
+        ||!vk.queueWaitIdle){say("required Vulkan functions unavailable; renderer disabled");return false;}
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};poolInfo.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;poolInfo.queueFamilyIndex=queueFamily;if(vk.createCommandPool(device,&poolInfo,nullptr,&uploadPool)!=VK_SUCCESS)return false;
     VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};commandInfo.commandPool=uploadPool;commandInfo.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;commandInfo.commandBufferCount=1;if(vk.allocateCommandBuffers(device,&commandInfo,&uploadCommand)!=VK_SUCCESS)return false;
     if(vk.setDeviceLoaderData&&vk.setDeviceLoaderData(device,uploadCommand)!=VK_SUCCESS)return false;
@@ -775,7 +786,7 @@ void HandRenderer::shutdown() {
   if (!impl_ || !impl_->device)
     return;
   if (impl_->queue && impl_->vk.queueWaitIdle)
-    impl_->vk.queueWaitIdle(impl_->queue);
+    impl_->retireQueue();
   impl_->cachedSceneFramebuffers.clearAfterCompletion(impl_->device,impl_->vk);
   for(auto framebuffer:impl_->sceneFramebuffers)
     if(framebuffer)impl_->vk.destroyFramebuffer(impl_->device,framebuffer,nullptr);
