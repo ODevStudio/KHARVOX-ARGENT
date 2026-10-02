@@ -23,7 +23,7 @@ and record them here after each subsystem.
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-`0d2a56d`, `95fde2b`, and `ee72ebc`. These record audit evidence rather than
+`0d2a56d`, `95fde2b`, `ee72ebc`, and `4476e5b`. These record audit evidence rather than
 changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -36,7 +36,7 @@ payloads still retire GPU use before overwriting the single buffer.
 
 | Subsystem | Status | Evidence and disposition |
 | --- | --- | --- |
-| Startup, launcher, device/runtime negotiation | Pending | Inspect failure handling, trust boundaries, and required capabilities. |
+| Startup, launcher, device/runtime negotiation | Probe hang fixed; broader negotiation review in progress | Bound pipe reads and terminate only the launcher-created probe on timeout or excessive output. Four real subprocess scenarios pass, and the launcher translation unit compiles. Capability negotiation, complete GUI launch and runtime startup remain to verify. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
@@ -57,8 +57,32 @@ payloads still retire GPU use before overwriting the single buffer.
 | `31aa381` | OpenXR image handoff and source/runtime teardown | Stability | Require verified queue/device retirement or device loss before dropping live GPU resource leases. Flat-copy recovery drains the device to cover cross-queue bridge work; source retirement can no longer silently fail before caller destruction. Seven bounded failure checks pass, with both layer translation units compiled. |
 | `b8ff384` | Diagnostic stereo eye readback | Stability | Check fallback queue retirement before destroying readback staging, fence or command pool. Production call-site failure injection reproduces unsafe destruction without the fix; six isolated scenarios and real GPU export pass with it. |
 | `b292fd3` | Pause HUD texture upload | Stability | Verify queue retirement before image release and staging destruction; device loss disables the image without reporting completion. Five call-site scenarios use real WIC asset decoding and fake Vulkan/XR dispatch; the original unverified wait hits the unsafe-release guard. |
+| `2fa1ae3` | Launcher runtime diagnostics | Stability | Replace blocking pipe reads before the ineffective timeout with bounded output collection. Stop only the owned probe on failure, preserve final output bytes and process-start errors, and prevent game launch after capture failure. Four real subprocess scenarios pass; restoring the original read/wait order reproduces the hang. |
 
 ## Subsystem Evidence
+
+### Launcher Runtime Probe
+
+`processOutput` originally blocked in `ReadFile` until the child closed its output,
+then applied a 15-second process wait. A hung OpenXR probe could therefore freeze
+the launcher indefinitely before that timeout was reached. The collector now
+reads only available pipe bytes and observes one deadline across reading and
+process exit. It bounds captured output to 1 MiB of input bytes and stops only
+the exact child process handle created by the launcher; termination failures are
+reported rather than hidden. Normal exit drains remaining output without killing
+the child. Pipe setup and process-start failures retain their actual Win32 error.
+The launcher rejects start/capture failure before launching DOOM.
+
+`launcher_probe_output` launches four hidden real children: normal output larger
+than the pipe capacity with final metadata, a silent hang, a closed-pipe hang, and
+output flooding. The test uses a short deadline and an independent 3-second child
+watchdog. Restoring the original blocking read/wait order fails at the watchdog;
+the fixed hang paths finish in about 203 ms and return the expected child exit.
+The four-scenario check passed in 0.58 seconds. The launcher translation unit
+compiles with its production Unicode definitions; an existing numeric-setting
+`wchar_t` to `char` conversion warning remains. These checks exercise the actual
+collector but not the complete GUI launch or a real hanging OpenXR runtime.
+This setup-only stability change does not affect gameplay FPS.
 
 ### Desktop Mirror
 
