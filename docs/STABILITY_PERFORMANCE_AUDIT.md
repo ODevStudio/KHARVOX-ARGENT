@@ -42,7 +42,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Hand/depth rendering and HUD | Upload/shutdown retirement fixed; wider HUD review pending | Verified upload and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Four focused checks pass, including five isolated failure/device-loss scenarios and both stereo GPU layouts; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
-| Diagnostics and capture | Pending | Inspect disabled-path overhead and resource/readback lifetime. |
+| Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | Pending | Inspect state restoration, connection/error handling, and per-frame work. |
 | Build, test, packaging, and end-to-end verification | Pending | Expand automated coverage and record unavailable runtime evidence explicitly. |
 
@@ -54,6 +54,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `08c2ae7` | SFS source ownership and queue synchronization | Stability | Move shared queue locking into actual source-ring submissions. An exhausted acquire no longer holds the queue mutex needed by present to release a slot. Bounded concurrency regression reproduced the old entry-point lock schedule, then passed after moving the lock; five GPU checks also pass. |
 | `cbb995d` | Hand texture uploads and renderer teardown | Stability | Validate queue retirement before freeing upload staging or renderer resources; reject failed upload-command reset and missing upload dispatch functions. Isolated GPU-backed checks distinguish fail-fast retirement from unsafe destruction, and allow device-loss cleanup. Existing array-eye/separate-eye rendering and framebuffer reuse checks pass. |
 | `31aa381` | OpenXR image handoff and source/runtime teardown | Stability | Require verified queue/device retirement or device loss before dropping live GPU resource leases. Flat-copy recovery drains the device to cover cross-queue bridge work; source retirement can no longer silently fail before caller destruction. Seven bounded failure checks pass, with both layer translation units compiled. |
+| `b8ff384` | Diagnostic stereo eye readback | Stability | Check fallback queue retirement before destroying readback staging, fence or command pool. Production call-site failure injection reproduces unsafe destruction without the fix; six isolated scenarios and real GPU export pass with it. |
 
 ## Subsystem Evidence
 
@@ -188,6 +189,23 @@ fail-fast exit without releasing the lease. It tests the shared gate and lifetim
 primitive, not linked XR frame entry points or real driver failures. Both outer
 layer translation units compile. Session/events, partial creation and full
 headset shutdown remain outside this verification.
+
+### Diagnostic Eye Readback
+
+The readback resource destructor ignored a failed queue-idle result after a failed
+fence wait, then freed resources still referenced by submitted work. It now reuses
+the retirement gate before unmapping or destruction. Successful readback still
+uses only its existing fence wait; recovery adds no normal-path work.
+
+`gpu_transfer_retirement` exercises the production inline readback function with
+fake dispatch and live-resource guards in six bounded hidden children: normal
+output, failed fence with successful recovery, device-loss teardown, unverified
+retirement, rejected submission and failed mapping. The original wait behavior
+exits through the unsafe-destruction guard (`0x56`); the fix fails fast instead
+(`0xc0000602`). Device loss permits teardown but does not export pixels. The
+combined two-check run passed in 0.86 seconds, including `sfs_graphics_gpu` with
+real RTX 4090 pixels and stereo PPM eye/row/channel validation. The outer layer
+also compiles. These checks do not simulate a real GPU hang or memory pressure.
 
 ## Verification Limits
 
