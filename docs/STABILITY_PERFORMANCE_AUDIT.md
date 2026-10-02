@@ -23,8 +23,8 @@ and record them here after each subsystem.
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, and `079f5bf`. These record audit evidence rather than
-changing runtime behavior.
+`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, and `6923f92`.
+These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
 12.3 microseconds per eligible frame in total. At a CPU-bound 100 FPS this would
@@ -44,7 +44,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
-| Input, camera/game hooks, and external integrations | IPC cancellation fixed; broader review in progress | Six client/server cancellation sites now retain operation storage until completion. Four production-call-site checks and real Windows pipe cancellation pass. Bridge-thread shutdown, state restoration, input and per-frame work remain to inspect. |
+| Input, camera/game hooks, and external integrations | IPC cancellation and PSVR2 bridge join fixed; broader review in progress | Six client/server cancellation sites retain operation storage until completion. Four call-site checks and native Windows cancellation pass. PSVR2 normal/exceptional shutdown joins the pipe worker before context release; delayed-worker regressions pass. Client lifecycle, state restoration, input and per-frame work remain to inspect. |
 | Build, test, packaging, and end-to-end verification | Pending | Expand automated coverage and record unavailable runtime evidence explicitly. |
 
 ## New Fix Commits
@@ -60,6 +60,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `2fa1ae3` | Launcher runtime diagnostics | Stability | Replace blocking pipe reads before the ineffective timeout with bounded output collection. Stop only the owned probe on failure, preserve final output bytes and process-start errors, and prevent game launch after capture failure. Four real subprocess scenarios pass; restoring the original read/wait order reproduces the hang. |
 | `523b2e2` | OpenXR copy error recovery | Stability | Retire submitted work before constructing/logging error strings so allocation failure cannot unwind live image leases first. Both layer translation units compile; lifetime/gate checks pass. Verification of handler order is source inspection, not linked XR OOM injection. |
 | `e893499` | bHaptics/PSVR2 IPC clients and bridges | Stability | Drain cancelled overlapped operations before releasing stack storage, buffers and events. Stop connection waits after terminal wait errors. Four production-call-site regressions fail with the original 50 ms cleanup and pass with delayed completion; native Windows pipe cancellation also passes. |
+| `6782cf1` | PSVR2 bridge worker ownership | Stability | Scope-own the pipe worker and require thread exit before releasing its context, security storage or wait handles. Normal and injected-exception delayed-worker regressions fail on the original implementation and pass after the fix; thread-start failure still returns the existing error. |
 
 ## Subsystem Evidence
 
@@ -87,9 +88,32 @@ translation units compile.
 These tests do not exercise complete bridge processes with physical devices,
 nonresponsive kernel drivers, or failure of the completion-event wait itself.
 Retaining storage can extend worker shutdown if cancellation is slow; no new wait
-is added to a successful transfer or the rendering thread. Bridge worker ownership
-on normal/exceptional shutdown remains the next integration audit target. No FPS
-gain is claimed.
+is added to a successful transfer or the rendering thread. No FPS gain is claimed.
+
+### PSVR2 Bridge Worker Ownership
+
+The bridge previously closed the worker handle after an unchecked two-second
+wait, then released the shutdown event, parent handle and stack context. An
+exception after worker creation bypassed shutdown/join entirely and unwound the
+context and current-user security storage. Either path could leave the pipe
+worker reading invalid storage. The worker now has a noncopyable scope owner
+that requests shutdown and verifies thread exit before cleanup. Normal shutdown
+explicitly stops it before closing its wait handles; exception unwinding stops
+it before destroying the earlier-declared context and security object.
+
+Three checks call the production bridge entry point with a replacement real
+Windows thread that waits 2.2 seconds after shutdown, an injected loop exception,
+and thread-creation failure. Normal and exceptional shutdown both fail the
+original lifetime guard. Fixed checks pass in 4.48 seconds, with exactly one
+worker-handle close and the existing return codes. The production PSVR2 bridge
+translation unit compiles; its IPC connect/read check also passes in the
+four-check targeted run (5.53 seconds).
+
+The replacement worker and absent backend directory deliberately avoid touching
+physical controllers. These checks establish entry-point shutdown ownership,
+not full hardware delivery or actual pipe-worker exception recovery. Joining a
+slow cancellation can extend shutdown; it does not add per-frame rendering work
+or a claimed FPS gain. Client worker start/stop ownership remains to inspect.
 
 ### Launcher Runtime Probe
 
@@ -315,6 +339,9 @@ run passed all 28 checks in 35.38 seconds, including queue concurrency, hand
 retirement, the shared XR retirement gate, production readback/pause-upload
 failure checks, broader shader/negotiation coverage, launcher subprocesses and
 IPC cancellation checks.
+After `6782cf1`, the affected PSVR2 IPC check and three new bridge-thread checks
+also pass. The expanded 31-check harness has not yet been run as one combined
+suite; the 28-check run above predates this worker-ownership follow-up.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -325,6 +352,7 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish bridge-thread ownership, XR session/events and partial-creation cleanup, then
+Next audit stage: finish client worker ownership, XR session/events and
+partial-creation cleanup, then
 startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
