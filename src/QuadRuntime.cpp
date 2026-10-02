@@ -533,8 +533,8 @@ bool presentQuadImpl(Device& d,VkQueue q,uint32_t family,uint32_t index,const So
         auto r=steamRuntime?xrWorker().invoke([&]{return XR(xrEndFrame)(session,&end);}):XR(xrEndFrame)(session,&end);begun=false;if(steamRuntime){steamFrameBegun=false;++steamEndCalls;}check(r,"xrEndFrame");
         if(frame.shouldRender){++frames;if(frames==1||frames%300==0)log("QUAD_FRAME_SUBMITTED count="+std::to_string(frames)+" result="+std::to_string(r)+" state="+std::to_string(sessionState)+" gameImage="+std::to_string(imageIndex)+" predictedTime="+std::to_string(time));}
     }catch(const std::exception& e){
-        log(std::string("QUAD_DISABLED ")+e.what());failed=true;
         if(consumed&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=requireGpuRetirement(VK(vkDeviceWaitIdle)(d.device),"quad copy error")==VK_SUCCESS;}
+        log(std::string("QUAD_DISABLED ")+e.what());failed=true;
         if(acquired&&waited&&(!consumed||complete)){XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};XR(xrReleaseSwapchainImage)(swapchain,&ri);}
         if(begun){XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=time;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;if(kharvox::isSteamBackedOpenXRRuntime(runtimeKind))xrWorker().invoke([&]{XR(xrEndFrame)(session,&end);});else XR(xrEndFrame)(session,&end);}
     }

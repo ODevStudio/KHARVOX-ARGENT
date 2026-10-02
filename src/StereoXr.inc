@@ -273,9 +273,9 @@ StereoPresentResult presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uin
                 " submitToCompletionMs="+std::to_string(ms(submitDone,completedAt))+" fenceWaitMs="+std::to_string(fenceWaitMs)+" completionVerified=1");
         }
     }catch(const std::exception& error){
+        if(submitted&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=requireGpuRetirement(VK(vkQueueWaitIdle)(boundQueue),"stereo copy error")==VK_SUCCESS;}
         log(std::string("STEREO_PRESENT_FAILED ")+error.what());
         if(!submitted)fsr1.discardRecordedFrame();
-        if(submitted&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=requireGpuRetirement(VK(vkQueueWaitIdle)(boundQueue),"stereo copy error")==VK_SUCCESS;}
         if(!submitted||complete)handRenderer.finishSceneIntegratedFrame();
 
         if(!submitted||complete)for(unsigned e=0;e<2;++e)if(acquired[e]&&waited[e]){
