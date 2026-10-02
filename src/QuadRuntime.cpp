@@ -417,18 +417,7 @@ bool presentQuad(Device& d,VkQueue q,uint32_t family,uint32_t index,const Source
     auto frame=[&]{return presentQuadImpl(d,q,family,index,source,imageIndex,present);};
     return simulator?xrWorker().invoke(frame):frame();
 }
-void shutdownXRImpl(VkDevice d){
-    std::lock_guard<std::recursive_mutex> guard(mutex);if(boundDevice!=d)return;
-    try{cancelStereoImpl();}catch(const std::exception& e){log(std::string("STEREO_SHUTDOWN_END_FAILED ")+e.what());}
-    controllerActions.destroy();
-    std::lock_guard<std::recursive_mutex> queueGuard(*device.queueMutex);
-    requireGpuRetirement(VK(vkDeviceWaitIdle)(d),"XR shutdown");copyTiming.shutdownAfterCompletion();diagnosticCopyTiming.shutdownAfterCompletion();bridge.destroy(device);destroySwapchain();releasePauseBindings();if(localSpace)XR(xrDestroySpace)(localSpace);if(space)XR(xrDestroySpace)(space);if(session)XR(xrDestroySession)(session);
-    localSpace=XR_NULL_HANDLE;
-    if(fence)VK(vkDestroyFence)(d,fence,nullptr);if(pool)VK(vkDestroyCommandPool)(d,pool,nullptr);
-    space=XR_NULL_HANDLE;session=XR_NULL_HANDLE;fence=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;boundDevice=VK_NULL_HANDLE;running=false;failed=true;
-    log("XR_SHUTDOWN");
-    runtimeDevice=VK_NULL_HANDLE;runtimeGdpa=nullptr;
-}
+#include "XrShutdown.inc"
 void shutdownXR(VkDevice d){if(simulator)xrWorker().invoke([&]{shutdownXRImpl(d);});else shutdownXRImpl(d);
     if(runtimeDevice.load()==d){runtimeDevice=VK_NULL_HANDLE;runtimeGdpa=nullptr;}}
 }
