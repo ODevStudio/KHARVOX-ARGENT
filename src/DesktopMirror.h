@@ -20,7 +20,7 @@ class DesktopMirror {
  VkCommandPool pool{};VkCommandBuffer command{};VkSemaphore acquired{};VkFence done{};
  std::vector<VkSemaphore> ready;
  bool pending{};
- bool mirrorEye{},blankPresented{};
+ bool mirrorEye{},blankPresented{},failed{};
  DesktopMirrorPacing pacing;
  static void check(VkResult r){if(r!=VK_SUCCESS)throw std::runtime_error("Mirror Vulkan result="+std::to_string(r));}
 public:
@@ -34,9 +34,9 @@ public:
   return end!=value&&!*end&&fps<=240?uint32_t(fps):60;
  }
  VkSwapchainKHR handle()const{return chain;}
- bool needsFrame()const{return chain&&(mirrorEye||!blankPresented);}
+ bool needsFrame()const{return chain&&!failed&&(mirrorEye||!blankPresented);}
  bool create(Device& d,const VkSwapchainCreateInfoKHR& original,uint32_t maxFps=configuredFps(),bool showEye=configuredEnabled()){
-  mirrorEye=showEye;blankPresented=false;
+  mirrorEye=showEye;blankPresented=failed=false;
   pacing.configure(maxFps);
   auto info=original;info.oldSwapchain=VK_NULL_HANDLE;info.imageArrayLayers=1;info.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;info.flags=0;info.pNext=nullptr;
   sourceExtent=original.imageExtent;
@@ -87,6 +87,7 @@ public:
  }
  void present(Device& d,VkImage source,VkQueue sourceRetirementQueue,DesktopMirrorPacing::Clock::time_point now=DesktopMirrorPacing::Clock::now(),VkExtent2D finalExtent={},VkImageLayout sourceLayout=VK_IMAGE_LAYOUT_GENERAL,bool waitForSource=false){
   if(!needsFrame()||!pacing.due(now))return;
+  try{
   const auto readExtent=finalExtent.width&&finalExtent.height?finalExtent:sourceExtent;
   if(pending){
    const auto status=d.proc<PFN_vkGetFenceStatus>("vkGetFenceStatus")(d.device,done);
@@ -94,7 +95,8 @@ public:
    check(status);check(d.proc<PFN_vkResetFences>("vkResetFences")(d.device,1,&done));pending=false;
   }
   uint32_t index{};auto r=d.proc<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(d.device,chain,0,acquired,VK_NULL_HANDLE,&index);
-  if(r!=VK_SUCCESS&&r!=VK_SUBOPTIMAL_KHR)return;
+  if(r==VK_NOT_READY||r==VK_TIMEOUT)return;
+  if(r!=VK_SUBOPTIMAL_KHR)check(r);
   std::lock_guard<std::recursive_mutex> lock(*d.queueMutex);
   check(d.proc<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(command,0));VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   check(d.proc<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(command,&begin));
@@ -147,15 +149,29 @@ public:
   if(mirrorEye&&(waitForSource||sourceRetirementQueue!=d.graphicsQueue))check(d.proc<PFN_vkWaitForFences>("vkWaitForFences")(d.device,1,&done,VK_TRUE,UINT64_MAX));
   VkPresentInfoKHR p{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};p.waitSemaphoreCount=1;p.pWaitSemaphores=&ready[index];p.swapchainCount=1;p.pSwapchains=&chain;p.pImageIndices=&index;
   const auto presented=d.proc<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(d.graphicsQueue,&p);
+  if(presented!=VK_SUBOPTIMAL_KHR)check(presented);
   if(!mirrorEye&&(presented==VK_SUCCESS||presented==VK_SUBOPTIMAL_KHR))blankPresented=true;
+  }catch(...){
+   failed=true;
+   if(pending&&mirrorEye){
+    std::lock_guard<std::recursive_mutex> lock(*d.queueMutex);
+    const auto retired=d.proc<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(d.graphicsQueue);
+    if(retired!=VK_SUCCESS&&retired!=VK_ERROR_DEVICE_LOST){RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+   }
+   throw;
+  }
  }
  void destroy(Device& d){
-  if(!chain)return;d.proc<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(d.device);
+  if(!chain)return;
+  std::lock_guard<std::recursive_mutex> lock(*d.queueMutex);
+  const auto retired=d.proc<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(d.device);
+  if(retired!=VK_ERROR_DEVICE_LOST)check(retired);
   if(done)d.proc<PFN_vkDestroyFence>("vkDestroyFence")(d.device,done,nullptr);
   if(acquired)d.proc<PFN_vkDestroySemaphore>("vkDestroySemaphore")(d.device,acquired,nullptr);
   for(auto sem:ready)if(sem)d.proc<PFN_vkDestroySemaphore>("vkDestroySemaphore")(d.device,sem,nullptr);ready.clear();pending=false;
   if(pool)d.proc<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(d.device,pool,nullptr);
   d.proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(d.device,chain,nullptr);chain=VK_NULL_HANDLE;
+  done=VK_NULL_HANDLE;acquired=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;command=VK_NULL_HANDLE;images.clear();
  }
 };
 }
