@@ -35,7 +35,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Startup, launcher, device/runtime negotiation | Pending | Inspect failure handling, trust boundaries, and required capabilities. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
-| FSR1 | Pending | Inspect direct sampling, fallback, image barriers, resize, and failure cleanup. |
+| FSR1 | GPU path reviewed; XR teardown pending | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source retirement remains part of the wider XR teardown audit. |
 | Hand/depth rendering and HUD | Upload/shutdown retirement fixed; wider HUD review pending | Verified upload and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Four focused checks pass, including five isolated failure/device-loss scenarios and both stereo GPU layouts; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Pending | Inspect frame/session state, acquire/wait/release, queue/fence failures, and shutdown. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
@@ -127,11 +127,49 @@ pixels, laser visibility, cached framebuffer reuse and matched destruction.
 The hand renderer and both outer layer translation units compile in the focused
 harness. This fix adds no per-frame work or quantified FPS gain.
 
+### FSR1 GPU Path
+
+Reviewed `Fsr1Upscaler.cpp`, `FsrRuntime.inc`, source capability negotiation, and
+the current copy caller. Direct descriptors are limited to sampled owned UNORM
+sources and the matching eye layer. Incompatible/sRGB sources retain the byte-copy
+fallback. The direct source is restored to the copy caller's transfer-source
+layout. Cached output includes image, layer, revision, rectangle and output extent;
+discarded or unsubmitted work invalidates layout/revision bookkeeping. Fresh
+`fsr1_gpu` checks all four supported formats with and without sampled sources,
+including partial source-view failure and host/device OOM submission rejection.
+
+An isolated GPU timestamp benchmark on RTX 4090 used two 1280x1280 source eyes,
+2560x2560 output per eye, 160 frames per path and 140 post-warmup samples. Times
+below sum the two FSR eye intervals, excluding source clears and output readback.
+
+| Format | Copy Median (ms) | Direct Median (ms) | Saved (ms) | Copy p99 (ms) | Direct p99 (ms) |
+| --- | --- | --- | --- | --- | --- |
+| RGBA8 UNORM | 0.239616 | 0.226880 | 0.012736 | 0.716800 | 0.712672 |
+| BGRA8 UNORM | 0.239616 | 0.228064 | 0.011552 | 0.719584 | 0.694528 |
+
+This single sequential benchmark indicates roughly 5% less isolated FSR GPU work,
+not 5% more gameplay FPS. Clock state, real shader content, resolution and the
+CPU/GPU critical path can change the result. CPU and GPU savings cannot simply
+be summed into an end-to-end FPS claim. No further per-frame FSR change is
+justified here. Lazy fallback texture allocation could save VRAM but would add
+descriptor/failure-path complexity without demonstrated frame-time benefit.
+
+Remaining cross-path target: `retireStereoSources` returns on a failed queue wait,
+while its layer caller continues source destruction. Verify failure propagation
+and lifetime retention during the XR teardown audit before marking that path
+complete. The compute checks above do not prove source/runtime teardown safe.
+
 ## Verification Limits
 
-The prior focused harness compiled `ArgentLayer.cpp` and `QuadRuntime.cpp` and
-passed 11 GPU/lifetime checks. This audit will collect fresh evidence; those
-results alone do not prove the current audit complete. Headset/gameplay and
-full-package verification have not yet been performed. A real 120-300 second
+The current focused harness build compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
+SFS, hand rendering and FSR. Its final raw CTest run passed all 14 checks in
+23.31 seconds, including the new queue-concurrency and hand-retirement checks.
+Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
+are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
+handle conversion warning. These focused results do not prove the full audit
+complete. Root-package linking remains unverified: the focused harness uses local
+glslang without optimizer libraries, and the full package also requires the
+external bHaptics SDK DLL. Headset/gameplay verification is still missing.
+A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
