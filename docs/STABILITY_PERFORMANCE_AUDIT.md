@@ -23,7 +23,7 @@ and record them here after each subsystem.
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-`0d2a56d`, `95fde2b`, `ee72ebc`, and `4476e5b`. These record audit evidence rather than
+`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, and `079f5bf`. These record audit evidence rather than
 changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -44,7 +44,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
-| Input, camera/game hooks, and external integrations | Pending | Inspect state restoration, connection/error handling, and per-frame work. |
+| Input, camera/game hooks, and external integrations | IPC cancellation fixed; broader review in progress | Six client/server cancellation sites now retain operation storage until completion. Four production-call-site checks and real Windows pipe cancellation pass. Bridge-thread shutdown, state restoration, input and per-frame work remain to inspect. |
 | Build, test, packaging, and end-to-end verification | Pending | Expand automated coverage and record unavailable runtime evidence explicitly. |
 
 ## New Fix Commits
@@ -59,8 +59,37 @@ payloads still retire GPU use before overwriting the single buffer.
 | `b292fd3` | Pause HUD texture upload | Stability | Verify queue retirement before image release and staging destruction; device loss disables the image without reporting completion. Five call-site scenarios use real WIC asset decoding and fake Vulkan/XR dispatch; the original unverified wait hits the unsafe-release guard. |
 | `2fa1ae3` | Launcher runtime diagnostics | Stability | Replace blocking pipe reads before the ineffective timeout with bounded output collection. Stop only the owned probe on failure, preserve final output bytes and process-start errors, and prevent game launch after capture failure. Four real subprocess scenarios pass; restoring the original read/wait order reproduces the hang. |
 | `523b2e2` | OpenXR copy error recovery | Stability | Retire submitted work before constructing/logging error strings so allocation failure cannot unwind live image leases first. Both layer translation units compile; lifetime/gate checks pass. Verification of handler order is source inspection, not linked XR OOM injection. |
+| `e893499` | bHaptics/PSVR2 IPC clients and bridges | Stability | Drain cancelled overlapped operations before releasing stack storage, buffers and events. Stop connection waits after terminal wait errors. Four production-call-site regressions fail with the original 50 ms cleanup and pass with delayed completion; native Windows pipe cancellation also passes. |
 
 ## Subsystem Evidence
+
+### IPC Cancellation Lifetime
+
+Both IPC clients and both bridge servers previously requested `CancelIoEx`,
+waited at most 50 ms, then released the operation's event and stack storage.
+Cancellation is only a request; Windows can still access the `OVERLAPPED` and
+buffer after that interval. Six sites now use one checked completion-event drain
+before cleanup. A failed completion wait fails fast rather than returning live
+storage. A cancellation request that races completion is still drained. Connection
+loops also stop after terminal wait failures rather than spinning while the parent
+remains alive.
+
+The same check is compiled against all four production translation units. Seven
+scenarios cover synchronous success, pending success, immediate broken pipe,
+timeout, stop/parent exit, wait failure and cancellation returning `ERROR_NOT_FOUND`.
+Bridge variants cover reads and connects. The fixture delays cancellation
+completion by 120 ms and detects any early return or event/pipe closure. All four
+original implementations fail the lifetime guard; all four fixed targets pass.
+Native Windows tests also cancel pending connects and reads, and drain an already
+completed connect. The targeted run passes in 3.18 seconds; all four unmocked IPC
+translation units compile.
+
+These tests do not exercise complete bridge processes with physical devices,
+nonresponsive kernel drivers, or failure of the completion-event wait itself.
+Retaining storage can extend worker shutdown if cancellation is slow; no new wait
+is added to a successful transfer or the rendering thread. Bridge worker ownership
+on normal/exceptional shutdown remains the next integration audit target. No FPS
+gain is claimed.
 
 ### Launcher Runtime Probe
 
@@ -281,9 +310,11 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 ## Verification Limits
 
 The current focused harness build compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
-SFS, hand rendering and FSR. Its final raw CTest run passed all 16 checks in
-24.50 seconds, including queue concurrency, hand retirement, the shared XR
-retirement gate, and production readback/pause-upload failure checks.
+SFS, hand rendering, FSR and all four IPC translation units. Its final raw CTest
+run passed all 28 checks in 35.38 seconds, including queue concurrency, hand
+retirement, the shared XR retirement gate, production readback/pause-upload
+failure checks, broader shader/negotiation coverage, launcher subprocesses and
+IPC cancellation checks.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -294,6 +325,6 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish XR session/events and partial-creation cleanup, then
+Next audit stage: finish bridge-thread ownership, XR session/events and partial-creation cleanup, then
 startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
