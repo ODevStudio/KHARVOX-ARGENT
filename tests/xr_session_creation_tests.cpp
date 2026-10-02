@@ -1,6 +1,8 @@
 #include "../src/QuadRuntime.h"
 #include "../src/openxr/OpenXRRuntimePolicy.h"
+#include "../src/openxr/DisplayFormat.h"
 #include "../src/vulkan/GpuRetirement.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -25,6 +27,20 @@ constexpr std::array<const char*,26> names{{"normal","enable1","cached-device","
     "pool-failed","command-failed","loader-data-failed","fence-failed","timing",
     "missing-queue-properties","timing-log-failed","final-log-failed"}};
 Scenario scenario{};
+enum class SwapFailure { None, FormatCount, FormatFill, UnsupportedFormat, Create, ImageCount, ImageFill, Log };
+struct SwapScenario { uint32_t layers=1;SwapFailure failure{};unsigned eye{};bool upscale{},fallback{},mirror{}; } swapTest;
+std::array<bool,16> ownedSwapchains{};
+unsigned createdSwapchains{},destroyedSwapchains{},swapAttempts{},handsStops{};
+bool handsOwned{};
+XrSwapchain swapchain{};
+VkExtent2D extent{},sourceExtent{};
+VkFormat format{},compositionFormat{};
+uint32_t swapchainLayers{};
+bool swapchainFsrRequested{};
+std::vector<XrSwapchainImageVulkanKHR> images;
+struct EyeSwapchain { XrSwapchain handle{};std::vector<XrSwapchainImageVulkanKHR> images;std::vector<bool> initialized; };
+std::array<EyeSwapchain,2> stereoEyes;
+Source expectedSource;
 bool enable2{},simulator{},running{},failed{},gpuLive{},pauseOwned{};
 constexpr bool cleanRelease=false;
 unsigned createdSessions{},createdSpaces{},createdPools{},createdCommands{},createdFences{},propertiesCalls{},selections{};
@@ -83,7 +99,10 @@ HMODULE fakeModule(LPCWSTR) {
 FARPROC fakeExport(HMODULE module,LPCSTR) {
     return !module||scenario==Scenario::MissingExport?nullptr:reinterpret_cast<FARPROC>(fakePublic);
 }
-DWORD fakeEnvironment(LPCSTR,LPSTR,DWORD) { return 0; }
+DWORD fakeEnvironment(LPCSTR name,LPSTR value,DWORD size) {
+    if(swapTest.mirror&&!std::strcmp(name,"ARGENT_DESKTOP_MIRROR")&&size>=2){value[0]='1';value[1]=0;return 1;}
+    return 0;
+}
 XrResult fake_xrGetVulkanGraphicsRequirementsKHR(XrInstance,XrSystemId,XrGraphicsRequirementsVulkanKHR*) {
     return scenario==Scenario::RequirementsFailure?XR_ERROR_RUNTIME_FAILURE:XR_SUCCESS;
 }
@@ -106,10 +125,63 @@ XrResult fake_xrCreateSession(XrInstance,const XrSessionCreateInfo* info,XrSessi
     ++createdSessions;*out=handle<XrSession>(7);return XR_SUCCESS;
 }
 XrResult fake_xrEnumerateSwapchainFormats(XrSession,uint32_t capacity,uint32_t* count,int64_t* out) {
-    if((!capacity&&scenario==Scenario::FormatCountFailure)||(capacity&&scenario==Scenario::FormatFillFailure))
+    if((!capacity&&(scenario==Scenario::FormatCountFailure||swapTest.failure==SwapFailure::FormatCount))
+        ||(capacity&&(scenario==Scenario::FormatFillFailure||swapTest.failure==SwapFailure::FormatFill)))
         return XR_ERROR_RUNTIME_FAILURE;
-    *count=1;if(out)*out=VK_FORMAT_R8G8B8A8_SRGB;return XR_SUCCESS;
+    const std::array<int64_t,4> formats{{VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_R8G8B8A8_SRGB,
+        VK_FORMAT_B8G8R8A8_UNORM,VK_FORMAT_B8G8R8A8_SRGB}};
+    *count=swapTest.failure==SwapFailure::UnsupportedFormat?1:uint32_t(formats.size());
+    if(out){
+        require(capacity>=*count,"Format enumeration exceeded capacity");
+        if(swapTest.failure==SwapFailure::UnsupportedFormat)*out=VK_FORMAT_R16G16B16A16_SFLOAT;
+        else std::copy(formats.begin(),formats.end(),out);
+    }
+    return XR_SUCCESS;
 }
+XrResult fake_xrCreateSwapchain(XrSession,const XrSwapchainCreateInfo* info,XrSwapchain* out) {
+    const auto eye=swapAttempts++%(swapTest.layers==2?2:1);
+    const auto scale=swapTest.upscale&&!swapTest.fallback&&swapTest.layers==2?2u:1u;
+    const auto usage=XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT|XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT
+        |(swapTest.layers==2&&swapTest.mirror?XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT:0);
+    require(info->width==expectedSource.extent.width*scale&&info->height==expectedSource.extent.height*scale
+        &&info->format==xrDisplayFormat(expectedSource.format,expectedSource.displaySrgb)
+        &&info->arraySize==(swapTest.layers==2?1:swapTest.layers)&&info->usageFlags==usage
+        &&info->sampleCount==1&&info->mipCount==1&&info->faceCount==1,"Composition swapchain extent or usage changed");
+    if(swapTest.failure==SwapFailure::Create&&eye==swapTest.eye)return XR_ERROR_RUNTIME_FAILURE;
+    require(createdSwapchains<ownedSwapchains.size(),"Fixture swapchain capacity exceeded");
+    ownedSwapchains[createdSwapchains]=true;
+    *out=handle<XrSwapchain>(100+createdSwapchains++);return XR_SUCCESS;
+}
+XrResult fake_xrEnumerateSwapchainImages(XrSwapchain value,uint32_t capacity,uint32_t* count,XrSwapchainImageBaseHeader* out) {
+    const auto index=reinterpret_cast<std::uintptr_t>(value)-100;
+    require(index<createdSwapchains&&ownedSwapchains[index],"Images enumerated from an unowned swapchain");
+    const auto eye=unsigned(index)%(swapTest.layers==2?2:1);
+    if(eye==swapTest.eye&&((!capacity&&swapTest.failure==SwapFailure::ImageCount)
+        ||(capacity&&swapTest.failure==SwapFailure::ImageFill)))return XR_ERROR_RUNTIME_FAILURE;
+    *count=3;
+    if(out){
+        require(capacity>=*count,"Image enumeration exceeded capacity");
+        auto* vulkan=reinterpret_cast<XrSwapchainImageVulkanKHR*>(out);
+        for(unsigned i=0;i<*count;++i){require(vulkan[i].type==XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR,"Image type missing");vulkan[i].image=handle<VkImage>(200+index*3+i);}
+    }
+    return XR_SUCCESS;
+}
+XrResult fake_xrDestroySwapchain(XrSwapchain value) {
+    const auto index=reinterpret_cast<std::uintptr_t>(value)-100;
+    require(!gpuLive&&index<createdSwapchains&&ownedSwapchains[index],"Swapchain destroyed early or twice");
+    ownedSwapchains[index]=false;++destroyedSwapchains;return XR_SUCCESS;
+}
+struct Fsr {
+    bool ready{};
+    bool active() const { return ready; }
+    void releaseAfterCompletion() { require(!gpuLive,"FSR resources destroyed before retirement");ready=false; }
+} fsr1;
+bool fsrRequested() { return swapTest.upscale; }
+VkExtent2D fsrOutput(const Source& source,VkFormat) {
+    fsr1.ready=!swapTest.fallback;
+    return fsr1.ready?VkExtent2D{source.extent.width*2,source.extent.height*2}:source.extent;
+}
+void releaseHands() { require(!gpuLive,"Hands destroyed before retirement");handsStops+=handsOwned;handsOwned=false; }
 bool initializePauseBindings(const std::vector<int64_t>&) { pauseOwned=true;return true; }
 XrResult fake_xrCreateReferenceSpace(XrSession,const XrReferenceSpaceCreateInfo* info,XrSpace* out) {
     if((info->referenceSpaceType==XR_REFERENCE_SPACE_TYPE_VIEW&&scenario==Scenario::ViewFailure)
@@ -144,7 +216,6 @@ struct Actions {
     void destroy() { ready=false;++actionStops; }
 } controllerActions;
 struct Bridge { void destroy(Device&) { require(!gpuLive,"Bridge destroyed before retirement"); } } bridge;
-void destroySwapchain() { require(!gpuLive,"Swapchain destroyed before retirement"); }
 void releasePauseBindings() { require(!gpuLive,"Pause image destroyed before retirement");if(pauseOwned)++pauseStops;pauseOwned=false; }
 void cancelStereoImpl() {}
 VkResult fake_vkDeviceWaitIdle(VkDevice) { ++waits;gpuLive=false;return VK_SUCCESS; }
@@ -157,7 +228,8 @@ namespace perf { bool enabled() { return timingsRequested(); } }
 void log(const std::string& message) {
     if((scenario==Scenario::PauseLogFailure&&message.rfind("PAUSE_BINDINGS ",0)==0)
         ||(scenario==Scenario::TimingLogFailure&&message.rfind("PERF_XR_GPU_SUPPORT ",0)==0)
-        ||(scenario==Scenario::FinalLogFailure&&message=="XR_SESSION created: Vulkan composition ready"))throw std::bad_alloc{};
+        ||(scenario==Scenario::FinalLogFailure&&message=="XR_SESSION created: Vulkan composition ready")
+        ||(swapTest.failure==SwapFailure::Log&&(message.rfind("XR_SWAPCHAIN ",0)==0||message.rfind("XR_EYE_SWAPCHAINS ",0)==0)))throw std::bad_alloc{};
 }
 namespace {
 #define XR(name) fake_##name
@@ -165,6 +237,7 @@ namespace {
 #define GetModuleHandleW fakeModule
 #define GetProcAddress fakeExport
 #define GetEnvironmentVariableA fakeEnvironment
+#include "../src/XrSwapchainCreation.inc"
 #include "../src/XrSessionCreation.inc"
 #undef GetEnvironmentVariableA
 #undef GetProcAddress
@@ -177,19 +250,43 @@ bool expectedFailure(Scenario mode) {
     return mode!=Scenario::Normal&&mode!=Scenario::Enable1&&mode!=Scenario::CachedDevice
         &&mode!=Scenario::SimulatorMissingModule&&mode!=Scenario::Timing&&mode!=Scenario::MissingQueueProperties;
 }
-void run(Scenario mode) {
+Device reset(Scenario mode) {
     scenario=mode;enable2=mode!=Scenario::Enable1;simulator=mode==Scenario::SimulatorMissingModule;
     running=failed=gpuLive=pauseOwned=false;
     createdSessions=createdSpaces=createdPools=createdCommands=createdFences=propertiesCalls=selections=0;
     destroyedSessions=destroyedSpaces=destroyedPools=destroyedFences=waits=pauseStops=actionStops=0;
     session=XR_NULL_HANDLE;space=localSpace=XR_NULL_HANDLE;boundDevice=VK_NULL_HANDLE;boundQueue=VK_NULL_HANDLE;
     pool=VK_NULL_HANDLE;fence=VK_NULL_HANDLE;command=VK_NULL_HANDLE;controllerActions={};copyTiming={};diagnosticCopyTiming={};
+    swapTest={};ownedSwapchains={};createdSwapchains=destroyedSwapchains=swapAttempts=handsStops=0;
+    handsOwned=swapchainFsrRequested=false;swapchain=XR_NULL_HANDLE;extent=sourceExtent={};
+    format=compositionFormat=VK_FORMAT_UNDEFINED;swapchainLayers=0;images={};stereoEyes={};fsr1={};expectedSource={};
     runtimeSelectedPhysical=mode==Scenario::CachedDevice?handle<VkPhysicalDevice>(2):VK_NULL_HANDLE;
     instance=handle<XrInstance>(1);
     Device input;input.instance=handle<VkInstance>(3);input.physical=handle<VkPhysicalDevice>(4);
     input.device=handle<VkDevice>(5);input.graphicsQueue=handle<VkQueue>(6);input.graphicsFamily=1;
     input.gipa=mode==Scenario::MissingDownstream?nullptr:fakeNext;input.gdpa=fakeDeviceProc;input.setLoaderData=fakeLoaderData;
     runtimeDevice=input.device;runtimeGdpa=input.gdpa;
+    return input;
+}
+void verifyShutdown(const Device& input) {
+    const bool bound=createdSessions!=0;
+    const auto expectedPauseStops=pauseOwned?1u:0u;
+    gpuLive=bound;
+    shutdownXRImpl(input.device);
+    require(waits==unsigned(bound)&&actionStops==unsigned(bound)&&destroyedSessions==createdSessions
+        &&destroyedSpaces==createdSpaces&&destroyedPools==createdPools&&destroyedFences==createdFences
+        &&pauseStops==expectedPauseStops&&destroyedSwapchains==createdSwapchains,"Partial construction bypassed retirement or resource cleanup");
+    require(!gpuLive&&!pauseOwned&&!session&&!space&&!localSpace&&!boundDevice&&!pool&&!fence
+        &&!copyTiming.pool&&!diagnosticCopyTiming.pool&&!controllerActions.ready&&!fsr1.active()&&!handsOwned
+        &&!swapchain&&images.empty()&&std::none_of(ownedSwapchains.begin(),ownedSwapchains.end(),[](bool live){return live;}),
+        "Shutdown retained partial resources");
+    for(const auto& eye:stereoEyes)require(!eye.handle&&eye.images.empty()&&eye.initialized.empty(),"Partial eye resources survived shutdown");
+    shutdownXRImpl(input.device);
+    require(waits==unsigned(bound)&&destroyedSessions==createdSessions&&destroyedPools==createdPools
+        &&destroyedSwapchains==createdSwapchains,"Repeated shutdown destroyed a partially constructed resource twice");
+}
+void run(Scenario mode) {
+    auto input=reset(mode);
     bool rejected{};
     try { startSession(input,input.graphicsQueue,1,0); }
     catch(const std::exception&) { rejected=true; }
@@ -205,19 +302,55 @@ void run(Scenario mode) {
     if(mode==Scenario::MissingQueueProperties)require(!diagnosticCopyTiming.pool,"Unavailable optional timing dispatch was used");
     if(mode==Scenario::Timing)require(diagnosticCopyTiming.pool&&diagnosticCopyTiming.period==1&&diagnosticCopyTiming.bits==64,
         "Available diagnostic timing was disabled");
-    const auto expectedPauseStops=pauseOwned?1u:0u;
-    gpuLive=bound;
-    shutdownXRImpl(input.device);
-    require(waits==unsigned(bound)&&actionStops==unsigned(bound)&&destroyedSessions==createdSessions
-        &&destroyedSpaces==createdSpaces&&destroyedPools==createdPools&&destroyedFences==createdFences
-        &&pauseStops==expectedPauseStops,"Partial construction bypassed retirement or resource cleanup");
-    require(!gpuLive&&!pauseOwned&&!session&&!space&&!localSpace&&!boundDevice&&!pool&&!fence
-        &&!copyTiming.pool&&!diagnosticCopyTiming.pool&&!controllerActions.ready,"Shutdown retained partial resources");
-    shutdownXRImpl(input.device);
-    require(waits==unsigned(bound)&&destroyedSessions==createdSessions&&destroyedPools==createdPools,
-        "Repeated shutdown destroyed a partially constructed resource twice");
+    verifyShutdown(input);
     std::cout<<names[size_t(mode)]<<" rejected="<<rejected<<" session="<<createdSessions<<" spaces="<<createdSpaces
         <<" pools="<<createdPools<<" fences="<<createdFences<<" retirement="<<waits<<std::endl;
+}
+void runSwapchain(const SwapScenario& test) {
+    auto input=reset(Scenario::Normal);
+    startSession(input,input.graphicsQueue,1,0);
+    swapTest=test;
+    Source source;source.extent={1280,720};source.format=VK_FORMAT_R8G8B8A8_UNORM;source.displaySrgb=true;
+    expectedSource=source;
+    bool rejected{};
+    try { createSwapchain(source,test.layers,test.upscale&&test.layers==2); }
+    catch(const std::exception&) { rejected=true; }
+    require(rejected==(test.failure!=SwapFailure::None),"Swapchain creation accepted failure or rejected usable setup");
+    if(!rejected){
+        const auto count=test.layers==2?2u:1u;
+        require(createdSwapchains==count&&compositionFormat==VK_FORMAT_R8G8B8A8_SRGB&&format==source.format
+            &&swapchainLayers==test.layers,"Composition format or eye count changed");
+        if(test.layers==2)for(const auto& eye:stereoEyes)
+            require(eye.handle&&eye.images.size()==3&&eye.initialized==std::vector<bool>(3,false),"Stereo images were not fully initialized");
+        else require(swapchain&&images.size()==3,"Flat images were not fully initialized");
+        handsOwned=true;
+        createSwapchain(source,test.layers,test.upscale&&test.layers==2);
+        require(createdSwapchains==count&&!destroyedSwapchains&&handsOwned&&!handsStops,"Matching swapchain cache recreated resources");
+        const auto changed=[&](const Source& next,uint32_t layers){
+            swapTest.layers=layers;
+            expectedSource=next;
+            const auto previous=createdSwapchains;
+            createSwapchain(next,layers,test.upscale&&layers==2);
+            require(destroyedSwapchains==previous&&createdSwapchains==previous+(layers==2?2:1),"Recreation retained old resources");
+            require(compositionFormat==xrDisplayFormat(next.format,next.displaySrgb)&&format==next.format
+                &&swapchainLayers==layers,"Recreation retained stale metadata");
+        };
+        Source resized=source;resized.extent={1440,900};changed(resized,test.layers);
+        require(handsStops==1&&!handsOwned,"Old hand resources survived recreation");
+        Source reformatted=resized;reformatted.format=VK_FORMAT_B8G8R8A8_UNORM;changed(reformatted,test.layers);
+        Source linear=reformatted;linear.displaySrgb=false;changed(linear,test.layers);
+        changed(linear,test.layers==2?1:2);
+    }else {
+        unsigned expected{};
+        if(test.failure==SwapFailure::Create)expected=test.eye;
+        else if(test.failure==SwapFailure::ImageCount||test.failure==SwapFailure::ImageFill)expected=test.eye+1;
+        else if(test.failure==SwapFailure::Log)expected=test.layers==2?2:1;
+        require(createdSwapchains==expected&&!destroyedSwapchains,"Partial creation lost its owned handles");
+    }
+    verifyShutdown(input);
+    std::cout<<"swapchains layers="<<test.layers<<" failure="<<int(test.failure)<<" eye="<<test.eye
+        <<" upscale="<<test.upscale<<" fallback="<<test.fallback<<" mirror="<<test.mirror
+        <<" created/destroyed="<<createdSwapchains<<'/'<<destroyedSwapchains<<'\n';
 }
 }
 }
@@ -230,6 +363,22 @@ int main(int argc,char** argv) {
         ++scenarios;
         try { argent::run(static_cast<argent::Scenario>(i)); }
         catch(const std::exception& error) { ++failures;std::cerr<<argent::names[i]<<": "<<error.what()<<'\n'; }
+    }
+    if(argc==1||!std::strcmp(argv[1],"swapchains")){
+        const auto run=[&](const argent::SwapScenario& test){
+            ++scenarios;
+            try { argent::runSwapchain(test); }
+            catch(const std::exception& error){++failures;std::cerr<<"swapchain layers="<<test.layers<<" failure="<<int(test.failure)<<" eye="<<test.eye<<": "<<error.what()<<'\n';}
+        };
+        for(const auto layers:{1u,2u,3u})for(const auto failure:{argent::SwapFailure::None,argent::SwapFailure::FormatCount,
+            argent::SwapFailure::FormatFill,argent::SwapFailure::UnsupportedFormat,argent::SwapFailure::Create,
+            argent::SwapFailure::ImageCount,argent::SwapFailure::ImageFill,argent::SwapFailure::Log})run({layers,failure});
+        for(const auto failure:{argent::SwapFailure::Create,argent::SwapFailure::ImageCount,argent::SwapFailure::ImageFill})run({2,failure,1});
+        run({2,argent::SwapFailure::None,0,true});
+        run({2,argent::SwapFailure::None,0,true,true});
+        run({2,argent::SwapFailure::None,0,false,false,true});
+        run({2,argent::SwapFailure::None,0,true,false,true});
+        run({2,argent::SwapFailure::ImageFill,1,true});
     }
     std::cout<<scenarios<<" scenarios, "<<failures<<" failures\n";
     return !scenarios||failures?1:0;

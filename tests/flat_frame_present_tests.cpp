@@ -227,6 +227,10 @@ void run(Scenario mode,bool steam,bool prepared,bool throwLog) {
     require(!nativeOpen&&!steamFrameBegun&&!steamFramePrepared,"XR frame ownership was abandoned");
     require(!gpuLive,"Submitted GPU work was not retired");
     require(failed!=success,"Incorrect terminal frame state");
+    if(mode==Scenario::SwapchainFailure){
+        scenario=Scenario::Normal;
+        require(!presentQuadImpl(device,boundQueue,0,0,source,0,present)&&failed,"Terminal setup failure retried a partial swapchain");
+    }
     require(result==(submits!=0),"Consumed binary waits were not reported to the caller");
     require(waits==(mode==Scenario::SwapchainFailure&&!prepared?0u:1u),"Incorrect frame wait count");
     require(begins==(mode==Scenario::WaitFailure||(mode==Scenario::SwapchainFailure&&!prepared)?0u:1u),"Incorrect frame begin count");

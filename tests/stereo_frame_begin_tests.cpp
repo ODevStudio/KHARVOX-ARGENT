@@ -9,10 +9,10 @@
 namespace argent {
 namespace {
 enum class Scenario { Normal, NoRender, InvalidTracking, WaitFailure, BeginFailure,
-    UpdateFailure, LocateFailure, BeginLogFailure, FailureLogFailure, BothLogsFailure, EndFailure };
+    UpdateFailure, LocateFailure, BeginLogFailure, FailureLogFailure, BothLogsFailure, EndFailure, SwapchainFailure };
 Scenario scenario{};
 bool nativeOpen{}, failed{}, running{true}, steamFrameBegun{}, previousMenuQuad{};
-unsigned waits{}, begins{}, ends{};
+unsigned waits{}, begins{}, ends{}, swapchainCalls{};
 XrTime endedTime{}, referenceChangeTime{};
 constexpr XrTime displayTime = 123456;
 std::recursive_mutex mutex;
@@ -49,7 +49,10 @@ void check(XrResult result, const char* operation) {
 }
 void events() {}
 void startSession(Device&, VkQueue, uint32_t, uint32_t) {}
-void createSwapchain(const Source&, uint32_t, bool) {}
+void createSwapchain(const Source&, uint32_t, bool) {
+    ++swapchainCalls;
+    if (scenario == Scenario::SwapchainFailure) throw std::runtime_error("swapchain failure");
+}
 XrResult fake_xrWaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* state) {
     ++waits;
     state->predictedDisplayTime = displayTime;
@@ -103,7 +106,7 @@ void require(bool condition, const char* message) {
 void run(Scenario mode, bool steam) {
     scenario = mode;
     nativeOpen = failed = steamFrameBegun = previousMenuQuad = false;
-    waits = begins = ends = 0;
+    waits = begins = ends = swapchainCalls = 0;
     steamOrderViolations = steamWaitCalls = steamBeginCalls = steamEndCalls = stereoSerial = 0;
     endedTime = referenceChangeTime = 0;
     stereoPending = {};
@@ -126,12 +129,15 @@ void run(Scenario mode, bool steam) {
         require(pose.displayTime == displayTime && pose.serial == 1, "Frame pose did not advance");
         cancelStereoImpl();
     }
-    const bool beforeBegin = mode == Scenario::WaitFailure || mode == Scenario::BeginFailure;
+    const bool beforeWait = mode == Scenario::SwapchainFailure;
+    const bool beforeBegin = beforeWait || mode == Scenario::WaitFailure || mode == Scenario::BeginFailure;
     const bool terminal = mode != Scenario::Normal && mode != Scenario::NoRender && mode != Scenario::InvalidTracking;
     require(!escaped, "Logging failure escaped before frame cancellation");
     require(!nativeOpen && !stereoPending.begun && !steamFrameBegun, "Begun XR frame was abandoned");
     require(failed == terminal, "Incorrect terminal/retryable frame state");
-    require(waits == 1 && begins == (mode == Scenario::WaitFailure ? 0u : 1u)
+    if (terminal) require(!beginStereoImpl(device, source, pose, head, false, nullptr, nullptr)
+        && swapchainCalls == 1, "Terminal setup failure retried a partial swapchain");
+    require(waits == (beforeWait ? 0u : 1u) && begins == (beforeWait || mode == Scenario::WaitFailure ? 0u : 1u)
         && ends == (beforeBegin ? 0u : 1u), "Incorrect wait/begin/end call count");
     if (ends) require(endedTime == displayTime, "Cancellation used the wrong display time");
     std::cout << "steam=" << steam << " scenario=" << int(mode)
@@ -148,7 +154,7 @@ int main() {
                 argent::Scenario::BeginFailure, argent::Scenario::UpdateFailure,
                 argent::Scenario::LocateFailure, argent::Scenario::BeginLogFailure,
                 argent::Scenario::FailureLogFailure, argent::Scenario::BothLogsFailure,
-                argent::Scenario::EndFailure}) {
+                argent::Scenario::EndFailure, argent::Scenario::SwapchainFailure}) {
             if (!steam && (mode == argent::Scenario::BeginLogFailure || mode == argent::Scenario::BothLogsFailure)) continue;
             try {
                 argent::run(mode, steam);
