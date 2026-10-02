@@ -58,6 +58,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `b8ff384` | Diagnostic stereo eye readback | Stability | Check fallback queue retirement before destroying readback staging, fence or command pool. Production call-site failure injection reproduces unsafe destruction without the fix; six isolated scenarios and real GPU export pass with it. |
 | `b292fd3` | Pause HUD texture upload | Stability | Verify queue retirement before image release and staging destruction; device loss disables the image without reporting completion. Five call-site scenarios use real WIC asset decoding and fake Vulkan/XR dispatch; the original unverified wait hits the unsafe-release guard. |
 | `2fa1ae3` | Launcher runtime diagnostics | Stability | Replace blocking pipe reads before the ineffective timeout with bounded output collection. Stop only the owned probe on failure, preserve final output bytes and process-start errors, and prevent game launch after capture failure. Four real subprocess scenarios pass; restoring the original read/wait order reproduces the hang. |
+| `523b2e2` | OpenXR copy error recovery | Stability | Retire submitted work before constructing/logging error strings so allocation failure cannot unwind live image leases first. Both layer translation units compile; lifetime/gate checks pass. Verification of handler order is source inspection, not linked XR OOM injection. |
 
 ## Subsystem Evidence
 
@@ -215,6 +216,31 @@ fail-fast exit without releasing the lease. It tests the shared gate and lifetim
 primitive, not linked XR frame entry points or real driver failures. Both outer
 layer translation units compile. Session/events, partial creation and full
 headset shutdown remain outside this verification.
+
+Follow-up `523b2e2` closes an error-path ordering gap: the stereo and flat-copy
+handlers constructed an allocating log message before reaching the retirement
+gate. A host allocation failure there could bypass retirement and unwind borrowed
+leases. Retirement now runs first; a subsequent logging exception cannot abandon
+live GPU work. Normal-path work is unchanged. The layer compiles, and the existing
+retirement/lifetime checks pass; actual XR entry-point logging OOM is not injected.
+
+### Broader Shader and Negotiation Checks
+
+Seven additional existing checks passed: `sfs_bindless_gpu`,
+`sfs_fragment_bindless_gpu`, `sfs_sampling_gpu`, `water_robustness_gpu`,
+`runtime_vulkan_dispatch`, `sfs_capability`, and `queue_bridge`. The targeted run,
+including three retirement/lifetime checks, passed all ten in 3.00 seconds.
+GPU checks verify divergent sampled descriptors, mono/stereo layer selection,
+implicit/explicit LOD, gradients, integer fetch, scissor edges, shared-memory
+barriers, and protected out-of-range UBO/SSBO/image reads without changing valid
+reads. The queue bridge verifies changing pixels and binary-semaphore reuse
+across transfer family 5 and graphics family 0.
+
+Negotiation checks exercise vendor-neutral limits, immutable multiview feature
+chains, API-version/extension alternatives, and downstream/runtime device command
+routing. These are controlled fixtures, not proof of every captured Eternal
+shader, other GPU vendors, a linked game-layer launch, or headset composition.
+No new runtime optimization is justified by this passing coverage alone.
 
 ### Pause HUD Texture Upload
 
