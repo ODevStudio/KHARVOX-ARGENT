@@ -23,7 +23,8 @@ and record them here after each subsystem.
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-and `0d2a56d`. These record audit evidence rather than changing runtime behavior.
+`0d2a56d`, `95fde2b`, and `ee72ebc`. These record audit evidence rather than
+changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
 12.3 microseconds per eligible frame in total. At a CPU-bound 100 FPS this would
@@ -39,7 +40,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
-| Hand/depth rendering and HUD | Upload/shutdown retirement fixed; wider HUD review pending | Verified upload and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Four focused checks pass, including five isolated failure/device-loss scenarios and both stereo GPU layouts; wider HUD/input paths remain to inspect. |
+| Hand/depth rendering and HUD | Hand and pause-texture retirement fixed; wider HUD review pending | Verified uploads and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Hand GPU/layout tests and five pause-upload call-site scenarios pass; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
@@ -55,6 +56,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `cbb995d` | Hand texture uploads and renderer teardown | Stability | Validate queue retirement before freeing upload staging or renderer resources; reject failed upload-command reset and missing upload dispatch functions. Isolated GPU-backed checks distinguish fail-fast retirement from unsafe destruction, and allow device-loss cleanup. Existing array-eye/separate-eye rendering and framebuffer reuse checks pass. |
 | `31aa381` | OpenXR image handoff and source/runtime teardown | Stability | Require verified queue/device retirement or device loss before dropping live GPU resource leases. Flat-copy recovery drains the device to cover cross-queue bridge work; source retirement can no longer silently fail before caller destruction. Seven bounded failure checks pass, with both layer translation units compiled. |
 | `b8ff384` | Diagnostic stereo eye readback | Stability | Check fallback queue retirement before destroying readback staging, fence or command pool. Production call-site failure injection reproduces unsafe destruction without the fix; six isolated scenarios and real GPU export pass with it. |
+| `b292fd3` | Pause HUD texture upload | Stability | Verify queue retirement before image release and staging destruction; device loss disables the image without reporting completion. Five call-site scenarios use real WIC asset decoding and fake Vulkan/XR dispatch; the original unverified wait hits the unsafe-release guard. |
 
 ## Subsystem Evidence
 
@@ -190,6 +192,25 @@ primitive, not linked XR frame entry points or real driver failures. Both outer
 layer translation units compile. Session/events, partial creation and full
 headset shutdown remain outside this verification.
 
+### Pause HUD Texture Upload
+
+The setup-only static texture upload freed staging and released a waited XR image
+after an unsuccessful queue-idle wait. It now uses the shared retirement gate:
+success permits image release, device loss tears down the unavailable texture
+without releasing an image as completed, and other wait errors fail fast before
+resource release. No extra wait, upload or decode is added to normal frames.
+
+The expanded `gpu_transfer_retirement` check includes the production
+`PauseBindings.inc` and decodes the checked-in PNG through WIC. Five additional
+bounded hidden children cover normal upload and reuse, unverified retirement,
+device loss, submission rejection and mapping failure. Live-resource and XR image
+guards verify staging cleanup, availability, wait counts, no second upload on
+reuse and exactly-once swapchain destruction. Restoring the original unchecked
+wait hits the unsafe-release guard (`0x56`); the fixed path produces the expected
+fail-fast status (`0xc0000602`). All eleven readback/upload scenarios passed.
+Dispatch is simulated here; headset compositor and real device loss remain
+unverified. `QuadRuntime.cpp` compiles with the production include.
+
 ### Diagnostic Eye Readback
 
 The readback resource destructor ignored a failed queue-idle result after a failed
@@ -210,8 +231,9 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 ## Verification Limits
 
 The current focused harness build compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
-SFS, hand rendering and FSR. Its final raw CTest run passed all 14 checks in
-23.31 seconds, including the new queue-concurrency and hand-retirement checks.
+SFS, hand rendering and FSR. Its final raw CTest run passed all 16 checks in
+24.50 seconds, including queue concurrency, hand retirement, the shared XR
+retirement gate, and production readback/pause-upload failure checks.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -221,3 +243,7 @@ external bHaptics SDK DLL. Headset/gameplay verification is still missing.
 A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
+
+Next audit stage: finish XR session/events and partial-creation cleanup, then
+startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
+input/integrations and diagnostics. No full-audit completion is claimed.
