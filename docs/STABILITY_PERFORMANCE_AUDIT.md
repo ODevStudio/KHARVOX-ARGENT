@@ -23,7 +23,8 @@ and record them here after each subsystem.
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, and `6923f92`.
+`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
+and `5d121be`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -44,7 +45,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
-| Input, camera/game hooks, and external integrations | IPC cancellation and PSVR2 bridge join fixed; broader review in progress | Six client/server cancellation sites retain operation storage until completion. Four call-site checks and native Windows cancellation pass. PSVR2 normal/exceptional shutdown joins the pipe worker before context release; delayed-worker regressions pass. Client lifecycle, state restoration, input and per-frame work remain to inspect. |
+| Input, camera/game hooks, and external integrations | IPC cancellation, worker join and client restart races fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Six original stop/restart regressions fail before the fix; 14 affected checks pass afterward. State restoration, broader input, per-frame work and complete unload remain to inspect. |
 | Build, test, packaging, and end-to-end verification | Pending | Expand automated coverage and record unavailable runtime evidence explicitly. |
 
 ## New Fix Commits
@@ -61,6 +62,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `523b2e2` | OpenXR copy error recovery | Stability | Retire submitted work before constructing/logging error strings so allocation failure cannot unwind live image leases first. Both layer translation units compile; lifetime/gate checks pass. Verification of handler order is source inspection, not linked XR OOM injection. |
 | `e893499` | bHaptics/PSVR2 IPC clients and bridges | Stability | Drain cancelled overlapped operations before releasing stack storage, buffers and events. Stop connection waits after terminal wait errors. Four production-call-site regressions fail with the original 50 ms cleanup and pass with delayed completion; native Windows pipe cancellation also passes. |
 | `6782cf1` | PSVR2 bridge worker ownership | Stability | Scope-own the pipe worker and require thread exit before releasing its context, security storage or wait handles. Normal and injected-exception delayed-worker regressions fail on the original implementation and pass after the fix; thread-start failure still returns the existing error. |
+| `2b9cad1` | bHaptics/PSVR2 client worker lifetime | Stability | Serialize start, stop signaling and final handle retirement; retain a thread handle so quick session restart can verify the previous worker's exit. Publish started state only after configuration/event setup. Six stop/restart regressions reproduce the original races; lifecycle, startup-failure and existing cancellation checks pass after the fix. |
 
 ## Subsystem Evidence
 
@@ -113,7 +115,41 @@ The replacement worker and absent backend directory deliberately avoid touching
 physical controllers. These checks establish entry-point shutdown ownership,
 not full hardware delivery or actual pipe-worker exception recovery. Joining a
 slow cancellation can extend shutdown; it does not add per-frame rendering work
-or a claimed FPS gain. Client worker start/stop ownership remains to inspect.
+or a claimed FPS gain.
+
+### IPC Client Start/Stop Ownership
+
+`ControllerActions::create` and `destroy` start and asynchronously stop both
+clients across XR session lifetimes. Previously, final worker cleanup published
+`workerStarted=false` before retiring its event, allowing a new start to overlap
+old cleanup. A stop caller could also load an event and then signal it after the
+worker closed it. A start while the previous worker was still stopping simply
+returned, losing that session's restart.
+
+Start, stop signaling and final handle retirement now share one lifetime mutex
+per client. Workers retain their thread handles until cleanup. A start that finds
+a stopping worker duplicates its handle under the mutex, releases the mutex,
+waits for verified exit, then retries startup. The duplicate prevents cleanup
+from invalidating the wait handle. Configuration and event setup finish before
+publishing started state, so an early C++ exception cannot leave a nonexistent
+worker marked active. Event/thread creation failures preserve their prior
+optional-integration behavior.
+
+Six production-call-site schedules reproduce the original stop-signal,
+retirement/restart and pre-retirement rapid-restart races across both clients.
+The fixture uses real Windows events and actual client worker threads, pausing
+specific API boundaries; pipe discovery is deliberately unavailable. Six more
+checks cover event creation failure, thread creation failure and an injected
+configuration-read exception. All twelve lifecycle checks plus the two existing
+client cancellation checks pass in 1.98 seconds. Both unmocked client translation
+units compile.
+
+Normal rumble/trigger submission remains atomic-only and unchanged. A session
+restart may wait for an already-stopping worker, including slow cancellation;
+the wait does not hold the lifetime mutex and is not added to normal frames.
+No FPS gain is claimed. Complete DLL unload, resource-exhaustion failure of
+`DuplicateHandle`, real controller delivery and XR session recreation with
+hardware remain unverified.
 
 ### Launcher Runtime Probe
 
@@ -340,8 +376,9 @@ retirement, the shared XR retirement gate, production readback/pause-upload
 failure checks, broader shader/negotiation coverage, launcher subprocesses and
 IPC cancellation checks.
 After `6782cf1`, the affected PSVR2 IPC check and three new bridge-thread checks
-also pass. The expanded 31-check harness has not yet been run as one combined
-suite; the 28-check run above predates this worker-ownership follow-up.
+also pass. After `2b9cad1`, twelve new lifecycle checks and both affected client
+cancellation checks pass. The expanded 43-check harness has not yet been run as
+one combined suite; the 28-check run above predates these ownership follow-ups.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -352,7 +389,7 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish client worker ownership, XR session/events and
+Next audit stage: finish XR session/events and
 partial-creation cleanup, then
 startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
