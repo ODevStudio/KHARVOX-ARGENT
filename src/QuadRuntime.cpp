@@ -25,6 +25,7 @@
 #include "openxr/RuntimeVulkanDispatch.h"
 #include "openxr/RuntimeDeviceCreateChain.h"
 #include "openxr/NativeXrReleasePolicy.h"
+#include "vulkan/GpuRetirement.h"
 #include <array>
 #include <atomic>
 #include "hands/HandRenderer.h"
@@ -413,7 +414,7 @@ void prepareSteamFrame(Device&,VkSwapchainKHR swapchain){
 }
 bool presentQuadImpl(Device& d,VkQueue q,uint32_t family,uint32_t index,const Source& source,uint32_t imageIndex,const VkPresentInfoKHR& present){
     std::unique_lock<std::recursive_mutex> guard(mutex);if(!instance||failed||imageIndex>=source.images.size())return false;
-    bool consumed=false,begun=false,acquired=false,waited=false;XrTime time{};
+    bool consumed=false,complete=false,begun=false,acquired=false,waited=false;XrTime time{};
     try{
         if(!session){
             if(kharvox::isSteamBackedOpenXRRuntime(runtimeKind)){
@@ -516,6 +517,7 @@ bool presentQuadImpl(Device& d,VkQueue q,uint32_t family,uint32_t index,const So
             {std::lock_guard<std::recursive_mutex> lock(*d.queueMutex);checkVk(VK(vkQueueSubmit)(boundQueue,1,&submit,fence),"vkQueueSubmit copy");}consumed=true;
             // Diagnostic boot deliberately waits on CPU: simple, verifiable ownership before release/present.
             checkVk(VK(vkWaitForFences)(d.device,1,&fence,VK_TRUE,UINT64_MAX),"vkWaitForFences copy");
+            complete=true;
             double copyMs{};if(copyTiming.completed(copyMs)&&(frames==0||frames%300==0))log("XR_COPY_GPU_MS="+std::to_string(copyMs));
             if(crossQueue){static uint64_t bridged{};if(++bridged==1||bridged%300==0)log("XR_QUEUE_BRIDGE count="+std::to_string(bridged)+" sourceFamily="+std::to_string(family)+" xrFamily="+std::to_string(boundFamily));}
             XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};check(XR(xrReleaseSwapchainImage)(swapchain,&ri),"xrReleaseSwapchainImage");acquired=false;
@@ -532,7 +534,8 @@ bool presentQuadImpl(Device& d,VkQueue q,uint32_t family,uint32_t index,const So
         if(frame.shouldRender){++frames;if(frames==1||frames%300==0)log("QUAD_FRAME_SUBMITTED count="+std::to_string(frames)+" result="+std::to_string(r)+" state="+std::to_string(sessionState)+" gameImage="+std::to_string(imageIndex)+" predictedTime="+std::to_string(time));}
     }catch(const std::exception& e){
         log(std::string("QUAD_DISABLED ")+e.what());failed=true;
-        if(acquired&&waited){XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};XR(xrReleaseSwapchainImage)(swapchain,&ri);}
+        if(consumed&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=requireGpuRetirement(VK(vkDeviceWaitIdle)(d.device),"quad copy error")==VK_SUCCESS;}
+        if(acquired&&waited&&(!consumed||complete)){XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};XR(xrReleaseSwapchainImage)(swapchain,&ri);}
         if(begun){XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};end.displayTime=time;end.environmentBlendMode=XR_ENVIRONMENT_BLEND_MODE_OPAQUE;if(kharvox::isSteamBackedOpenXRRuntime(runtimeKind))xrWorker().invoke([&]{XR(xrEndFrame)(session,&end);});else XR(xrEndFrame)(session,&end);}
     }
     return consumed;
@@ -545,7 +548,8 @@ void shutdownXRImpl(VkDevice d){
     std::lock_guard<std::recursive_mutex> guard(mutex);if(boundDevice!=d)return;
     try{cancelStereoImpl();}catch(const std::exception& e){log(std::string("STEREO_SHUTDOWN_END_FAILED ")+e.what());}
     controllerActions.destroy();
-    VK(vkDeviceWaitIdle)(d);copyTiming.shutdownAfterCompletion();diagnosticCopyTiming.shutdownAfterCompletion();bridge.destroy(device);destroySwapchain();releasePauseBindings();if(localSpace)XR(xrDestroySpace)(localSpace);if(space)XR(xrDestroySpace)(space);if(session)XR(xrDestroySession)(session);
+    std::lock_guard<std::recursive_mutex> queueGuard(*device.queueMutex);
+    requireGpuRetirement(VK(vkDeviceWaitIdle)(d),"XR shutdown");copyTiming.shutdownAfterCompletion();diagnosticCopyTiming.shutdownAfterCompletion();bridge.destroy(device);destroySwapchain();releasePauseBindings();if(localSpace)XR(xrDestroySpace)(localSpace);if(space)XR(xrDestroySpace)(space);if(session)XR(xrDestroySession)(session);
     localSpace=XR_NULL_HANDLE;
     if(fence)VK(vkDestroyFence)(d,fence,nullptr);if(pool)VK(vkDestroyCommandPool)(d,pool,nullptr);
     space=XR_NULL_HANDLE;session=XR_NULL_HANDLE;fence=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;boundDevice=VK_NULL_HANDLE;running=false;failed=true;

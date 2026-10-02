@@ -275,7 +275,7 @@ StereoPresentResult presentStereoImpl(Device& d,const sfs::StereoFrame& pair,uin
     }catch(const std::exception& error){
         log(std::string("STEREO_PRESENT_FAILED ")+error.what());
         if(!submitted)fsr1.discardRecordedFrame();
-        if(submitted&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=VK(vkQueueWaitIdle)(boundQueue)==VK_SUCCESS;}
+        if(submitted&&!complete){std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);complete=requireGpuRetirement(VK(vkQueueWaitIdle)(boundQueue),"stereo copy error")==VK_SUCCESS;}
         if(!submitted||complete)handRenderer.finishSceneIntegratedFrame();
 
         if(!submitted||complete)for(unsigned e=0;e<2;++e)if(acquired[e]&&waited[e]){
@@ -299,7 +299,7 @@ void retireStereoSources(VkDevice d){
         std::lock_guard<std::recursive_mutex> guard(mutex);
         if(boundDevice!=d||!fsr1.active())return;
         std::lock_guard<std::recursive_mutex> queueGuard(*device.queueMutex);
-        if(VK(vkQueueWaitIdle)(boundQueue)!=VK_SUCCESS){failed=true;return;}
+        if(requireGpuRetirement(VK(vkQueueWaitIdle)(boundQueue),"stereo source")==VK_ERROR_DEVICE_LOST)failed=true;
         destroySwapchain();
     };
     if(simulator)xrWorker().invoke(retire);else retire();
