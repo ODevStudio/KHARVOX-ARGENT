@@ -4,6 +4,7 @@
 #include "../src/openxr/StereoProjection.h"
 #include "../src/vulkan/GpuRetirement.h"
 #include <array>
+#include <cstring>
 #include <iostream>
 #include <new>
 #include <stdexcept>
@@ -16,7 +17,9 @@ enum class Scenario { Normal, NoRender, SwapchainFailure, WaitFailure, BeginFail
 Scenario scenario{};
 bool failureLog{}, nativeOpen{}, gpuLive{}, imageOwned{}, imageWaited{}, failed{}, running{true};
 bool steamFramePrepared{}, steamFrameBegun{}, pauseBindingsReady{};
+bool stateLog{},nativeSessionRunning{},sessionBeginError{},sessionEndError{},inputActive{};
 unsigned waits{}, begins{}, ends{}, releases{}, submits{}, deviceWaits{};
+unsigned sessionStarts{},sessionStops{},inputClears{};
 DWORD callerThread{}, lifecycleThread{};
 XrTime endedTime{};
 constexpr XrTime displayTime=123456;
@@ -34,6 +37,12 @@ VkFence fence{};
 VkExtent2D extent{1280,720};
 std::vector<XrSwapchainImageVulkanKHR> images;
 XrSessionState sessionState=XR_SESSION_STATE_FOCUSED;
+XrTime referenceChangeTime{};
+std::vector<XrEventDataBuffer> queuedEvents;
+size_t eventIndex{};
+struct Actions { uint64_t syncCount{}; } controllerActions;
+struct Pending { bool begun{}; } stereoPending;
+namespace input { void clear() { ++inputClears;inputActive=false; } }
 kharvox::OpenXRRuntimeKind runtimeKind{};
 XrFrameState steamPreparedFrame{XR_TYPE_FRAME_STATE};
 uint64_t steamVrNativePresentDeferrals{}, steamOrderViolations{}, steamWaitCalls{}, steamBeginCalls{};
@@ -53,7 +62,6 @@ struct Bridge {
 } bridge;
 namespace presentation { bool pauseRootVisible() { return false; } }
 XrCompositionLayerQuad pauseBindingsLayer(const XrCompositionLayerQuad& quad) { return quad; }
-void events() { if(scenario==Scenario::EventFailure)throw std::runtime_error("event failure"); }
 void startSession(Device&,VkQueue,uint32_t,uint32_t) { throw std::runtime_error("Unexpected session creation"); }
 void createSwapchain(const Source&) {
     if(scenario==Scenario::SwapchainFailure)throw std::runtime_error("swapchain failure");
@@ -133,9 +141,30 @@ VkResult fake_vkWaitForFences(VkDevice,uint32_t,const VkFence*,VkBool32,uint64_t
     return VK_SUCCESS;
 }
 VkResult fake_vkDeviceWaitIdle(VkDevice) { ++deviceWaits;gpuLive=false;return VK_SUCCESS; }
+XrResult fake_xrPollEvent(XrInstance,XrEventDataBuffer* event) {
+    if(scenario==Scenario::EventFailure)return XR_ERROR_RUNTIME_FAILURE;
+    if(eventIndex==queuedEvents.size())return XR_EVENT_UNAVAILABLE;
+    *event=queuedEvents[eventIndex++];return XR_SUCCESS;
+}
+XrResult fake_xrBeginSession(XrSession,const XrSessionBeginInfo*) {
+    ++sessionStarts;
+    require(!nativeSessionRunning,"Beginning an already running native session");
+    if(sessionBeginError)return XR_ERROR_RUNTIME_FAILURE;
+    nativeSessionRunning=true;nativeOpen=false;return XR_SUCCESS;
+}
+XrResult fake_xrEndSession(XrSession) {
+    ++sessionStops;
+    require(nativeSessionRunning,"Ending a stopped native session");
+    if(sessionEndError)return XR_ERROR_RUNTIME_FAILURE;
+    nativeSessionRunning=nativeOpen=false;return XR_SUCCESS;
+}
+#define XR(name) fake_##name
+#include "../src/XrSessionEvents.inc"
+#undef XR
 }
 void log(const std::string& message) {
-    if((failureLog&&(message.rfind("QUAD_DISABLED ",0)==0||message.rfind("[STEAM-XR-SPLIT] prepare failed: ",0)==0))
+    if((stateLog&&message.rfind("XR_STATE=",0)==0)
+        ||(failureLog&&(message.rfind("QUAD_DISABLED ",0)==0||message.rfind("[STEAM-XR-SPLIT] prepare failed: ",0)==0))
         ||(scenario==Scenario::PreparedLogFailure&&message.rfind("[STEAM-XR-SPLIT] consumed=",0)==0)
         ||(scenario==Scenario::PrepareLogFailure&&message.rfind("[STEAM-XR-SPLIT] prepared=",0)==0)
         ||(scenario==Scenario::RepeatedAcquireLogFailure&&message.rfind("[STEAM-XR-SPLIT] acquire arrived ",0)==0)
@@ -158,6 +187,9 @@ void resetFrame(Scenario mode,bool steam,bool throwLog) {
     waits=begins=ends=releases=submits=deviceWaits=0;
     frames=steamOrderViolations=steamWaitCalls=steamBeginCalls=steamEndCalls=steamConsumedPreparedFrames=0;
     steamPreparedFrames=steamRepeatedAcquires=0;running=true;
+    nativeSessionRunning=inputActive=true;stateLog=sessionBeginError=sessionEndError=stereoPending.begun=false;
+    sessionStarts=sessionStops=inputClears=0;referenceChangeTime=0;controllerActions.syncCount=50;
+    queuedEvents.clear();eventIndex=0;sessionState=XR_SESSION_STATE_FOCUSED;
     endedTime=0;
     callerThread=GetCurrentThreadId();lifecycleThread=0;
     runtimeKind=steam?kharvox::OpenXRRuntimeKind::SteamVR:kharvox::OpenXRRuntimeKind::Unknown;
@@ -239,6 +271,86 @@ void runPreparation(Scenario mode,bool throwLog) {
     std::cout<<"preparation scenario="<<int(mode)<<" failureLog="<<throwLog
         <<" calls="<<waits<<'/'<<begins<<'/'<<ends<<'\n';
 }
+template<class T> XrEventDataBuffer eventBuffer(const T& event) {
+    static_assert(sizeof(T)<=sizeof(XrEventDataBuffer));
+    XrEventDataBuffer buffer{};std::memcpy(&buffer,&event,sizeof(event));return buffer;
+}
+void queueState(XrSessionState state,XrSession owner) {
+    XrEventDataSessionStateChanged event{XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED};
+    event.session=owner;event.state=state;queuedEvents={eventBuffer(event)};eventIndex=0;
+}
+struct StateCase { XrSessionState state;bool initialRunning=true,error=false,foreign=false; };
+void runState(StateCase test,bool throwLog) {
+    resetFrame(Scenario::Normal,true,false);stateLog=throwLog;running=nativeSessionRunning=test.initialRunning;
+    sessionBeginError=test.error&&test.state==XR_SESSION_STATE_READY;
+    sessionEndError=test.error&&test.state==XR_SESSION_STATE_STOPPING;
+    if(!test.foreign&&test.state==XR_SESSION_STATE_STOPPING&&test.initialRunning)
+        nativeOpen=stereoPending.begun=steamFrameBegun=true;
+    queueState(test.state,test.foreign?handle<XrSession>(99):session);
+    bool diagnosticEscaped{},nativeError{};
+    try { events(); }
+    catch(const std::bad_alloc&) { diagnosticEscaped=true; }
+    catch(const std::exception&) { nativeError=true; }
+    require(!diagnosticEscaped,"A consumed session event lost its transition to diagnostics");
+    const bool terminal=test.state==XR_SESSION_STATE_EXITING||test.state==XR_SESSION_STATE_LOSS_PENDING;
+    require(nativeError==(!test.foreign&&(test.error||terminal)),"Native session failure was swallowed or invented");
+    const bool start=!test.foreign&&test.state==XR_SESSION_STATE_READY&&!test.initialRunning;
+    const bool stop=!test.foreign&&test.state==XR_SESSION_STATE_STOPPING&&test.initialRunning;
+    const bool expectedRunning=test.error?test.initialRunning:(start||(!stop&&test.initialRunning));
+    require(running==expectedRunning&&nativeSessionRunning==expectedRunning
+        &&sessionStarts==unsigned(start)&&sessionStops==unsigned(stop),"Native session ownership diverged");
+    require(inputClears==unsigned(!test.foreign&&test.state!=XR_SESSION_STATE_FOCUSED)
+        &&inputActive==(!inputClears),"Session event retained unfocused input");
+    require(sessionState==(test.foreign?XR_SESSION_STATE_FOCUSED:test.state),"Foreign event changed session state");
+    if(stop)require(stereoPending.begun==test.error&&steamFrameBegun==test.error
+        &&nativeOpen==test.error&&!steamFramePrepared,"Session end result lost native frame ownership");
+    std::cout<<"state="<<test.state<<" initiallyRunning="<<test.initialRunning<<" nativeError="<<test.error
+        <<" foreign="<<test.foreign<<" logFailure="<<throwLog<<'\n';
+}
+void runStopRestart(bool throwLog) {
+    resetFrame(Scenario::Normal,true,false);stateLog=throwLog;
+    prepareSteamFrame(device,handle<VkSwapchainKHR>(12));
+    require(nativeOpen&&steamFramePrepared&&steamFrameBegun,"No frame prepared for session stop");
+    queueState(XR_SESSION_STATE_STOPPING,session);events();
+    require(!running&&!nativeOpen&&!steamFramePrepared&&!steamFrameBegun&&!stereoPending.begun&&sessionStops==1,
+        "Stopped session retained a frame for a later session run");
+    queueState(XR_SESSION_STATE_READY,session);events();
+    require(running&&sessionStarts==1,"Session did not restart");
+    prepareSteamFrame(device,handle<VkSwapchainKHR>(12));
+    Source source;source.extent=extent;source.images={handle<VkImage>(10)};
+    VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    require(presentQuadImpl(device,boundQueue,0,0,source,0,present)&&!failed&&!nativeOpen
+        &&waits==2&&begins==2&&ends==1&&steamConsumedPreparedFrames==1,
+        "Restarted session reused the prior run's prepared frame");
+    std::cout<<"stop/restart logFailure="<<throwLog<<" frameCalls="<<waits<<'/'<<begins<<'/'<<ends<<'\n';
+}
+void runOtherEvents() {
+    resetFrame(Scenario::Normal,true,false);
+    XrEventDataInteractionProfileChanged profile{XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED};
+    profile.session=handle<XrSession>(99);queuedEvents={eventBuffer(profile)};events();
+    require(controllerActions.syncCount==50,"Foreign profile event changed controller state");
+    XrEventDataReferenceSpaceChangePending reference{XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING};
+    reference.session=handle<XrSession>(99);reference.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;reference.changeTime=42;
+    queuedEvents={eventBuffer(reference)};eventIndex=0;events();
+    require(!referenceChangeTime,"Foreign reference event requested recentering");
+    reference.session=session;reference.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_STAGE;
+    queuedEvents={eventBuffer(reference)};eventIndex=0;events();
+    require(!referenceChangeTime,"Stage reference event changed local recentering");
+    profile.session=session;reference.referenceSpaceType=XR_REFERENCE_SPACE_TYPE_LOCAL;
+    queuedEvents={eventBuffer(profile),eventBuffer(reference)};eventIndex=0;events();
+    require(!controllerActions.syncCount&&referenceChangeTime==42&&inputActive&&running,
+        "Controller/recenter events lost their session scope");
+    std::cout<<"Profile and reference events preserve session scope\n";
+}
+void runTerminalEvent(bool pollError) {
+    resetFrame(pollError?Scenario::EventFailure:Scenario::Normal,true,false);
+    XrEventDataInstanceLossPending loss{XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING};
+    queuedEvents={eventBuffer(loss)};
+    bool nativeError{};
+    try { events(); }catch(const std::exception&) { nativeError=true; }
+    require(nativeError&&!sessionStarts&&!sessionStops,"Terminal event did not reach the caller");
+    std::cout<<"terminal event pollError="<<pollError<<'\n';
+}
 }
 }
 
@@ -274,6 +386,32 @@ int main() {
                 std::cerr<<"preparation scenario="<<int(mode)<<" failureLog="<<throwLog<<": "<<error.what()<<'\n';
             }
         }
+    }
+    for(const auto test:{argent::StateCase{XR_SESSION_STATE_READY,false},argent::StateCase{XR_SESSION_STATE_READY},
+        argent::StateCase{XR_SESSION_STATE_STOPPING},argent::StateCase{XR_SESSION_STATE_STOPPING,false},
+        argent::StateCase{XR_SESSION_STATE_FOCUSED},argent::StateCase{XR_SESSION_STATE_VISIBLE},
+        argent::StateCase{XR_SESSION_STATE_SYNCHRONIZED},argent::StateCase{XR_SESSION_STATE_IDLE,false},
+        argent::StateCase{XR_SESSION_STATE_READY,false,true},argent::StateCase{XR_SESSION_STATE_STOPPING,true,true},
+        argent::StateCase{XR_SESSION_STATE_STOPPING,true,false,true},argent::StateCase{XR_SESSION_STATE_EXITING},
+        argent::StateCase{XR_SESSION_STATE_LOSS_PENDING}}) {
+        for(const bool throwLog:{false,true}) {
+            ++scenarios;
+            try { argent::runState(test,throwLog); }
+            catch(const std::exception& error) { ++failures;std::cerr<<"state="<<test.state<<" logFailure="<<throwLog<<": "<<error.what()<<'\n'; }
+        }
+    }
+    for(const bool throwLog:{false,true}) {
+        ++scenarios;
+        try { argent::runStopRestart(throwLog); }
+        catch(const std::exception& error) { ++failures;std::cerr<<"stop/restart logFailure="<<throwLog<<": "<<error.what()<<'\n'; }
+    }
+    ++scenarios;
+    try { argent::runOtherEvents(); }
+    catch(const std::exception& error) { ++failures;std::cerr<<"other events: "<<error.what()<<'\n'; }
+    for(const bool pollError:{false,true}) {
+        ++scenarios;
+        try { argent::runTerminalEvent(pollError); }
+        catch(const std::exception& error) { ++failures;std::cerr<<"terminal event: "<<error.what()<<'\n'; }
     }
     std::cout<<scenarios<<" scenarios, "<<failures<<" failures\n";
     return failures?1:0;
