@@ -25,7 +25,7 @@ and record them here after each subsystem.
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-`7b3c206`, and `2a66aeb`.
+`7b3c206`, `2a66aeb`, and `fea8723`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -43,13 +43,13 @@ payloads still retire GPU use before overwriting the single buffer.
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
 | Hand/depth rendering and HUD | Hand and pause-texture retirement fixed; wider HUD review pending | Verified uploads and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Hand GPU/layout tests and five pause-upload call-site scenarios pass; wider HUD/input paths remain to inspect. |
-| OpenXR frame loop and image handoff | Frame recovery, session transitions and controller shutdown fixed; wider lifecycle review in progress | Twenty stereo-begin, 115 flat-present/preparation/event, ninety-nine stereo-present, eight shutdown and twenty controller-lifecycle scenarios pass. Production events preserve input/session transitions despite logging failure and clear stopped frame state before restart. Partial session creation, native runtime events and headset shutdown remain to verify. |
+| OpenXR frame loop and image handoff | Frame recovery and partial setup ownership reviewed; native lifecycle pending | Twenty-two stereo-begin, 115 flat-present/preparation/event, ninety-nine stereo-present, eight shutdown, twenty controller-lifecycle and fifty-eight session/swapchain scenarios pass. Partial swapchains remain owned for checked shutdown; both frame callers stop after setup failure. Native runtime events, image loss and headset shutdown remain to verify. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC ownership and controller teardown exceptions fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Controller cleanup now reaches both IPC stop requests and input clearing despite optional shutdown failures. Eight original controller regressions fail; twenty fixed lifecycle scenarios and native IPC restart checks pass. State restoration, broader input, per-frame work and complete unload remain to inspect. |
-| Build, test, packaging, and end-to-end verification | Pending | Expand automated coverage and record unavailable runtime evidence explicitly. |
+| Build, test, packaging, and end-to-end verification | Focused build/tests pass; package and native verification pending | All forty-nine focused checks pass in 35.96 seconds. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
 
-## New Fix Commits
+## New Audit Commits
 
 | Commit | Subsystem | Category | Finding and verification |
 | --- | --- | --- | --- |
@@ -72,8 +72,43 @@ payloads still retire GPU use before overwriting the single buffer.
 | `d94645c` | SteamVR prepared-frame creation | Stability | Contain repeated-acquire and failure diagnostics without losing a successfully begun frame. Six original preparation regressions fail; fourteen production-preparation cases and seventy presentation cases pass on the real worker. Six related checks pass in 0.39 seconds. |
 | `b9f1057` | OpenXR session events and restart | Stability | Guard state diagnostics and discard stereo/prepared frame markers after successful session end; retain ownership on end failure. Fifteen original event/restart regressions fail. All 115 flat/preparation/event scenarios pass; the full focused 48-check suite passes in 39.58 seconds. |
 | `cb974b5` | Startup / XR session creation | Stability | Check selected and downstream Vulkan dispatch before UUID verification; skip optional timing when queue-property dispatch is unavailable. Four original cases exit with access violation. Twenty-six production setup/shutdown scenarios and five related checks pass; the layer compiles. |
+| `4f9f6b3` | OpenXR composition swapchain ownership | Stability | Verification-only: exercise production creation/destruction through session shutdown, partial eye failures, cache reuse and recreation. Thirty-two added swapchain scenarios pass; frame fixtures confirm terminal failure isolation. Production extraction is identical, with no runtime behavior change. The full forty-nine-check suite passes. |
 
 ## Subsystem Evidence
+
+### Composition Swapchain Ownership
+
+Thirty-two additional scenarios execute production swapchain creation and
+destruction after production session setup, followed by production shutdown.
+They cover one-layer, separate-eye and array-layer layouts; format enumeration
+and unsupported formats; left/right creation and image-enumeration failures;
+throwing completion diagnostics; cached reuse; resize, source-format,
+display-encoding and layout changes; FSR output/fallback and mirror usage flags.
+Every created native handle remains owned until cleanup, and repeated shutdown
+does not destroy it twice. Matching cache keys retain hand resources; recreation
+releases them before replacing the old composition images.
+
+The existing flat-frame fixture now verifies that a later usable setup cannot
+retry after a terminal swapchain error. The stereo-begin fixture adds both native
+and SteamVR setup failures and verifies no wait/begin or repeated creation after
+failure. All twenty-two stereo-begin cases and 115 flat/preparation/event cases
+pass. Partial creation can leave incomplete cached resources, but these callers
+already quarantine the runtime and do not reuse them. Adding retry machinery or
+changing cache publication is not justified by current callers.
+
+The swapchain functions moved unchanged into `XrSwapchainCreation.inc` for direct
+coverage. Exact comparison confirms the extraction is identical after line-ending
+normalization. The session target now passes all fifty-eight cases, including the
+earlier twenty-six session checks. The full focused build and forty-nine-check raw
+verbose CTest run pass in 35.96 seconds. No runtime fix or FPS gain is claimed.
+
+Native handles, XR dispatch, completion, hand ownership and FSR output selection
+are simulated in this fixture. Earlier real GPU tests cover FSR rendering and
+hand resources, but do not verify native composition-swapchain destruction,
+runtime image loss, allocation exceptions or headset recreation. The current
+tests do not establish recovery from unavailable destruction procedures or failed
+native destruction. Those limits remain explicit rather than being treated as
+passing hardware coverage.
 
 ### Session Creation and Partial Cleanup
 
@@ -626,17 +661,19 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 
 The latest focused harness build compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
 SFS, hand rendering, FSR, the launcher and all four IPC translation units.
-With the session-transition fix `b9f1057`, the full raw verbose CTest run passes
-all 48 checks in 39.58 seconds. Coverage includes queue concurrency, GPU-backed shader/rendering checks,
+With the composition ownership checks `4f9f6b3`, the full raw verbose CTest run
+passes all 49 checks in 35.96 seconds. Coverage includes queue concurrency, GPU-backed shader/rendering checks,
 GPU lifetime gates, readback/pause upload, launcher subprocesses, IPC cancellation
 and worker ownership, controller action lifecycle, stereo begin/present,
-flat/prepared presentation, session events and shutdown diagnostics. Earlier full
-snapshots passed 28 checks in 35.38 seconds, 44 in 35.17 seconds and 47 in 35.60
-seconds. The final rebuilt flat/preparation/event target also passes all 115
+flat/prepared presentation, session events, partial session/swapchain creation
+and shutdown diagnostics. Earlier full snapshots passed 28 checks in 35.38
+seconds, 44 in 35.17 seconds, 47 in 35.60 seconds and 48 in 39.58 seconds.
+The rebuilt flat/preparation/event target also passes all 115
 scenarios after tightening its failed-end ownership assertion.
 After `cb974b5`, the new twenty-six-scenario session-creation target and five
 related checks pass in 0.21 seconds; the affected layer target also builds.
-The expanded full suite has not yet been rerun.
+The expanded session/swapchain target passes all fifty-eight scenarios in the
+latest full run, and both frame fixtures verify terminal setup-failure isolation.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -647,6 +684,5 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish composition swapchain creation and cleanup, then
-startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
+Next audit stage: startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
