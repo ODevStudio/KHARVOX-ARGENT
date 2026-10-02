@@ -17,7 +17,7 @@ class SourceRing {
     struct Slot { VkImage image{}; VkDeviceMemory memory{}; VkFence retired{}; bool acquired{},pending{}; };
     struct Chain { std::array<Slot,5> slots{}; uint32_t count{},cursor{}; bool retired{}; };
     VkDevice device_{}; VkQueue queue_{}; VkPhysicalDeviceMemoryProperties memory_{};
-    void (*lockQueue_)(){}; void (*unlockQueue_)(){};
+    std::recursive_mutex* queueMutex_{};
     std::mutex mutex_; std::condition_variable available_;
     // mutex_ is held across fence waits and queue submits in acquire()/present().
     // The image-barrier hook asks ownsImage() for every barrier on every
@@ -34,7 +34,8 @@ class SourceRing {
     SOURCE_FUNCTIONS(DECLARE)
 #undef DECLARE
     VkResult submit(VkQueue queue,const VkSubmitInfo& info,VkFence fence) {
-        struct Guard { SourceRing& owner; Guard(SourceRing& s):owner(s){if(owner.lockQueue_)owner.lockQueue_();} ~Guard(){if(owner.unlockQueue_)owner.unlockQueue_();} } guard(*this);
+        std::unique_lock<std::recursive_mutex> lock;
+        if(queueMutex_)lock=std::unique_lock<std::recursive_mutex>(*queueMutex_);
         return vkQueueSubmit(queue,1,&info,fence);
     }
     void publishImages(const Chain& chain) {
@@ -56,9 +57,9 @@ class SourceRing {
     }
 public:
     bool initialize(VkDevice device,VkQueue queue,PFN_vkGetDeviceProcAddr resolver,
-                    const VkPhysicalDeviceMemoryProperties& memory,void(*lockQueue)(),void(*unlockQueue)()) {
-        device_=device;queue_=queue;memory_=memory;lockQueue_=lockQueue;unlockQueue_=unlockQueue;
-        if(!device||!queue||!resolver||bool(lockQueue)!=bool(unlockQueue))return false;
+                    const VkPhysicalDeviceMemoryProperties& memory,std::recursive_mutex* queueMutex) {
+        device_=device;queue_=queue;memory_=memory;queueMutex_=queueMutex;
+        if(!device||!queue||!resolver)return false;
 #define LOAD(name) name=reinterpret_cast<PFN_##name>(resolver(device,#name));if(!name)return false;
         SOURCE_FUNCTIONS(LOAD)
 #undef LOAD

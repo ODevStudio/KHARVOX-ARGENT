@@ -63,7 +63,7 @@ int main(int argc,char** argv){try{
  DEVICE(vkCreateSemaphore);DEVICE(vkDestroySemaphore);DEVICE(vkCreateFence);DEVICE(vkDestroyFence);DEVICE(vkResetFences);DEVICE(vkWaitForFences);DEVICE(vkQueueSubmit);DEVICE(vkDeviceWaitIdle);DEVICE(vkDestroyCommandPool);DEVICE(vkDestroyDevice);
  VkQueue queue{};vkGetDeviceQueue(device,family,0,&queue);VkPhysicalDeviceMemoryProperties memory{};vkGetPhysicalDeviceMemoryProperties(physical,&memory);
  #ifdef KHARVOX_SFS_RING_RUNTIME
- check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr,nullptr),"Runtime ring init failed");
+ check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr),"Runtime ring init failed");
  struct RuntimeRing {
   VkDevice device;
   VkResult create(const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* out){return argent::sfs::createSourceSwapchain(device,info,out);}
@@ -74,7 +74,7 @@ int main(int argc,char** argv){try{
  } ring{device};
  DEVICE(vkCreateImageView);DEVICE(vkDestroyImageView);DEVICE(vkCreateRenderPass);DEVICE(vkDestroyRenderPass);DEVICE(vkCreateFramebuffer);DEVICE(vkDestroyFramebuffer);DEVICE(vkCmdBeginRenderPass);DEVICE(vkCmdEndRenderPass);
 #else
- argent::sfs::SourceRing ring;check(ring.initialize(device,queue,vkGetDeviceProcAddr,memory,nullptr,nullptr),"Ring init failed");
+ argent::sfs::SourceRing ring;check(ring.initialize(device,queue,vkGetDeviceProcAddr,memory,nullptr),"Ring init failed");
 #endif
  VkSwapchainCreateInfoKHR chainInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};chainInfo.minImageCount=2;chainInfo.imageFormat=VK_FORMAT_R8G8B8A8_UNORM;chainInfo.imageExtent={4,4};chainInfo.imageArrayLayers=2;chainInfo.imageUsage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 #ifdef KHARVOX_SFS_TEST_INDIRECT
@@ -215,7 +215,7 @@ int main(int argc,char** argv){try{
  // Cached device/command lookups must observe generation invalidation.
  check(!argent::sfs::sourceRingActive(device),"Destroyed SFS state still cached");
  check(argent::sfs::initialize(device,physical,vkGetDeviceProcAddr,runtimeMemory,configuration),"SFS reinitialize failed");
- check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr,nullptr),"Recreated SFS state lookup failed");
+ check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr),"Recreated SFS state lookup failed");
  VkCommandPool replayPool{};VkCommandPoolCreateInfo replayPoolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};replayPoolInfo.queueFamilyIndex=family;ok(vkCreateCommandPool(device,&replayPoolInfo,nullptr,&replayPool));
  VkCommandBuffer replayCommand{};VkCommandBufferAllocateInfo replayAlloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};replayAlloc.commandPool=replayPool;replayAlloc.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;replayAlloc.commandBufferCount=1;ok(vkAllocateCommandBuffers(device,&replayAlloc,&replayCommand));
  VkCommandBufferBeginInfo replayBegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

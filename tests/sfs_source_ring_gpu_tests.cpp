@@ -74,8 +74,9 @@ int main(int argc,char** argv){try{
  DEVICE(vkCreateSemaphore);DEVICE(vkDestroySemaphore);DEVICE(vkCreateFence);DEVICE(vkDestroyFence);DEVICE(vkResetFences);DEVICE(vkWaitForFences);DEVICE(vkQueueSubmit);DEVICE(vkDeviceWaitIdle);DEVICE(vkDestroyCommandPool);DEVICE(vkDestroyDevice);
  VkQueue queue{};vkGetDeviceQueue(device,family,0,&queue);VkPhysicalDeviceMemoryProperties memory{};vkGetPhysicalDeviceMemoryProperties(physical,&memory);
  ringDriver=vkGetDeviceProcAddr;submitDriver=vkQueueSubmit;resetDriver=vkResetFences;waitDriver=vkWaitForFences;
+ std::recursive_mutex ringQueueMutex;
  #ifdef KHARVOX_SFS_RING_RUNTIME
- check(kharvox::sfs::configureSourceRing(device,ringResolver,memory,queue,nullptr,nullptr),"Runtime ring init failed");
+ check(kharvox::sfs::configureSourceRing(device,ringResolver,memory,queue,&ringQueueMutex),"Runtime ring init failed");
  struct RuntimeRing {
   VkDevice device;
   VkResult create(const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* out){return kharvox::sfs::createSourceSwapchain(device,info,out);}
@@ -86,7 +87,7 @@ int main(int argc,char** argv){try{
  } ring{device};
  DEVICE(vkCreateImageView);DEVICE(vkDestroyImageView);DEVICE(vkCreateRenderPass);DEVICE(vkDestroyRenderPass);DEVICE(vkCreateFramebuffer);DEVICE(vkDestroyFramebuffer);DEVICE(vkCmdBeginRenderPass);DEVICE(vkCmdEndRenderPass);
 #else
- kharvox::sfs::SourceRing ring;check(ring.initialize(device,queue,ringResolver,memory,nullptr,nullptr),"Ring init failed");
+ kharvox::sfs::SourceRing ring;check(ring.initialize(device,queue,ringResolver,memory,&ringQueueMutex),"Ring init failed");
 #endif
  VkSwapchainCreateInfoKHR chainInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};chainInfo.minImageCount=2;chainInfo.imageFormat=VK_FORMAT_R8G8B8A8_UNORM;chainInfo.imageExtent={4,4};chainInfo.imageArrayLayers=2;chainInfo.imageUsage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 #ifdef KHARVOX_SFS_TEST_INDIRECT

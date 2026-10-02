@@ -488,7 +488,7 @@ VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice d,VkSwapchainKHR sc,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* image){
  auto s=deviceOf(key(d));VkResult r;
- if(argent::sfs::sourceSwapchain(d,sc)){static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceAcquire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::acquireSource(d,sc,timeout,sem,fence,image);}
+ if(argent::sfs::sourceSwapchain(d,sc)){static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceAcquire",t);r=argent::sfs::acquireSource(d,sc,timeout,sem,fence,image);}
  else r=s->proc<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(d,sc,timeout,sem,fence,image);
  if(r==VK_SUCCESS||r==VK_SUBOPTIMAL_KHR){if(quadSteamPrepareAllowed(s))argent::prepareSteamFrame(*s,sc);const auto prepared=prepareStereo(s,sc,*image);if(prepared!=VK_SUCCESS)return prepared;}return r;
 }
@@ -504,7 +504,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchain
       if(!s->graphicsQueue)return VK_ERROR_INITIALIZATION_FAILED;
       if(!argent::sfs::sourceRingActive(d)){VkPhysicalDeviceMemoryProperties mem{};
        reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceMemoryProperties"))(s->physical,&mem);
-       if(!argent::sfs::configureSourceRing(d,s->gdpa,mem,s->graphicsQueue,nullptr,nullptr))return VK_ERROR_INITIALIZATION_FAILED;}
+       if(!argent::sfs::configureSourceRing(d,s->gdpa,mem,s->graphicsQueue,s->queueMutex.get()))return VK_ERROR_INITIALIZATION_FAILED;}
       if(ci->oldSwapchain){auto old=s->mirrors.find(ci->oldSwapchain);if(old!=s->mirrors.end()){old->second->destroy(*s);s->mirrors.erase(old);}}
       modified.imageArrayLayers=2;
       char fsr[8]{};
@@ -584,7 +584,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKH
           }
           if(consumed)argent::readbackStereoIfRequested(*s,source.images[p->pImageIndices[0]],source.extent,source.format);
           if(sourcePresent){
-            VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=argent::sfs::presentSource(s->device,q,*p,consumed,sourceComplete);}
+            VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);r=argent::sfs::presentSource(s->device,q,*p,consumed,sourceComplete);}
             argent::sfs::copyCompleted(s->device);argent::trace::present();auto n=++presents;
             if(n==1||(argent::extendedLogging()&&n%120==0))argent::log("SFS_GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed));return r;
           }

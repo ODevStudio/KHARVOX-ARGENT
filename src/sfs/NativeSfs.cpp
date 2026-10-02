@@ -985,9 +985,9 @@ void reportGpuCheckpoints(VkDevice d,VkQueue queue) noexcept {
  }catch(const std::exception& error){note(std::string("GPU_CHECKPOINT_FAILED ")+error.what());}
 }
 bool sourceRingRequested(){static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("ARGENT_SFS_SOURCE_RING",value,8)==1&&value[0]=='1';}();return vrEnabled()&&enabled;}
-bool configureSourceRing(VkDevice d,PFN_vkGetDeviceProcAddr resolver,const VkPhysicalDeviceMemoryProperties& memory,VkQueue queue,void(*lock)(),void(*unlock)()){
+bool configureSourceRing(VkDevice d,PFN_vkGetDeviceProcAddr resolver,const VkPhysicalDeviceMemoryProperties& memory,VkQueue queue,std::recursive_mutex* queueMutex){
     auto s=state(d);std::unique_lock<std::shared_mutex> guard(s->mutex);
-    auto sources=std::make_unique<SourceRing>();if(!sources->initialize(d,queue,resolver,memory,lock,unlock))return false;
+    auto sources=std::make_unique<SourceRing>();if(!sources->initialize(d,queue,resolver,memory,queueMutex))return false;
     s->sources=std::move(sources);CommandCpuTiming::enabled.store(s->profileTiming&&!argent::perf::enabled(),std::memory_order_relaxed);note("source ring ACTIVE: application-owned stereo images (engine-requested count), GENERAL layout, same-device OpenXR, desktop WSI bypass");return true;
 }
 bool sourceRingActive(VkDevice d){if(!nativeProbeEnabled())return false;try{return bool(state(d)->sources);}catch(const std::exception&){return false;}}
