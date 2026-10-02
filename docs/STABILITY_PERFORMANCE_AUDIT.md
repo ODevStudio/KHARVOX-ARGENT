@@ -34,7 +34,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | --- | --- | --- |
 | Startup, launcher, device/runtime negotiation | Pending | Inspect failure handling, trust boundaries, and required capabilities. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
-| SFS frame publication and stereo source ownership | Reviewed; cross-path verification pending | Fresh five-test GPU run passes publication/map failures, unchanged-payload metadata progression, completion-gated retirement, consumed/unconsumed waits, submission failure, exhaustion, and recreation. Keep changed-payload device retirement; asynchronous slots need a separate lifetime design and runtime evidence. |
+| SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | Pending | Inspect direct sampling, fallback, image barriers, resize, and failure cleanup. |
 | Hand/depth rendering and HUD | Pending | Inspect borrowed game depth and owned framebuffers, resource reuse, and retirement. |
 | OpenXR frame loop and image handoff | Pending | Inspect frame/session state, acquire/wait/release, queue/fence failures, and shutdown. |
@@ -48,6 +48,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Commit | Subsystem | Category | Finding and verification |
 | --- | --- | --- | --- |
 | `aabbdb5` | Desktop mirror | Stability | Failure quarantine, verified error-path source retirement, queue-serialized destruction, and cleared handles. Failure-injection test reproduced a double-destruction on the original implementation, then passed after the fix. `ArgentLayer.cpp` compiled. |
+| `08c2ae7` | SFS source ownership and queue synchronization | Stability | Move shared queue locking into actual source-ring submissions. An exhausted acquire no longer holds the queue mutex needed by present to release a slot. Bounded concurrency regression reproduced the old entry-point lock schedule, then passed after moving the lock; five GPU checks also pass. |
 
 ## Subsystem Evidence
 
@@ -72,9 +73,27 @@ Fresh raw diagnostics: `sfs_source_ring_gpu`, `sfs_graphics_gpu`,
 `sfs_performance_gpu`, `sfs_capture_hooks_gpu`, and `sfs_screen_ui_gpu` all passed
 on an RTX 4090. Tests exercise real GPU pixels, logical timestamp slots, 32/64-bit
 occlusion aggregation, compute binding restoration, mapped-buffer failures, and
-stereo/mono command replay. No additional uniform/source lifetime change is
-justified by this inspection alone. The source-completion shortcut must continue
-to require both semaphore consumption and verified completion.
+stereo/mono command replay. The source-completion shortcut must continue to
+require both semaphore consumption and verified completion.
+
+The outer layer previously held the shared queue mutex throughout a blocking
+source acquire. When every slot was leased, acquire released only the ring mutex
+while waiting for present, which needed the still-held queue mutex. A bounded
+fake-driver regression using this original entry-point lock schedule failed
+because present could not progress before acquire timed out. An infinite acquire
+would deadlock. The fix removes both outer acquire/present locks and reuses the
+same device mutex inside `SourceRing::submit`, preserving queue exclusion without
+holding it across source-slot or fence waits. Removing just one outer lock would
+leave an opposing ring/queue lock order.
+
+`sfs_source_ring_registry` now verifies exhausted acquire/present progress,
+acquire and retirement submissions blocked by an independent queue user, and
+an independent queue user progressing during a blocked retirement-fence wait.
+The six-check post-fix run passed; `ArgentLayer.cpp`, `QuadRuntime.cpp`, and the
+SFS runtime compiled. Production call sites were inspected for opposing outer
+locks; the concurrency test exercises the ring and modeled caller schedule,
+not a linked game-layer or headset integration. No new average-FPS claim follows
+from this stability fix.
 
 ## Verification Limits
 
