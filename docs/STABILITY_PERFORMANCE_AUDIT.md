@@ -25,7 +25,7 @@ and record them here after each subsystem.
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-and `7b3c206`.
+`7b3c206`, and `2a66aeb`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -38,7 +38,7 @@ payloads still retire GPU use before overwriting the single buffer.
 
 | Subsystem | Status | Evidence and disposition |
 | --- | --- | --- |
-| Startup, launcher, device/runtime negotiation | Probe hang fixed; broader negotiation review in progress | Bound pipe reads and terminate only the launcher-created probe on timeout or excessive output. Four real subprocess scenarios pass, and the launcher translation unit compiles. Capability negotiation, complete GUI launch and runtime startup remain to verify. |
+| Startup, launcher, device/runtime negotiation | Probe hang and session dispatch crashes fixed; broader review in progress | Four real probe subprocess scenarios and twenty-six production session-creation scenarios pass. Missing GPU-verification dispatch rejects setup before resource creation; unavailable optional timing dispatch leaves setup usable. Partial session resources retire through existing shutdown. Broader negotiation, complete GUI launch and native runtime startup remain to verify. |
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
@@ -71,8 +71,40 @@ payloads still retire GPU use before overwriting the single buffer.
 | `11629d7` | Controller actions and XR teardown | Stability | Isolate optional haptic/trigger shutdown and action-resource dispatch exceptions; clean failed action creation before guarded diagnostics. Eight original regressions fail; twenty production-lifecycle scenarios pass, including continued outer GPU retirement and session destruction. Eight related checks pass in 1.34 seconds. |
 | `d94645c` | SteamVR prepared-frame creation | Stability | Contain repeated-acquire and failure diagnostics without losing a successfully begun frame. Six original preparation regressions fail; fourteen production-preparation cases and seventy presentation cases pass on the real worker. Six related checks pass in 0.39 seconds. |
 | `b9f1057` | OpenXR session events and restart | Stability | Guard state diagnostics and discard stereo/prepared frame markers after successful session end; retain ownership on end failure. Fifteen original event/restart regressions fail. All 115 flat/preparation/event scenarios pass; the full focused 48-check suite passes in 39.58 seconds. |
+| `cb974b5` | Startup / XR session creation | Stability | Check selected and downstream Vulkan dispatch before UUID verification; skip optional timing when queue-property dispatch is unavailable. Four original cases exit with access violation. Twenty-six production setup/shutdown scenarios and five related checks pass; the layer compiles. |
 
 ## Subsystem Evidence
+
+### Session Creation and Partial Cleanup
+
+Session creation called the selected Vulkan loader procedure and downstream
+instance dispatch before checking either pointer. Missing module, missing export
+and missing downstream dispatch each reproduced an access violation
+(`0xc0000005`). Optional diagnostic timing also called an unresolved queue-family
+procedure and reproduced the same crash.
+
+The selected and downstream procedures are now checked before UUID lookup.
+Unavailable verification still rejects setup before native session/resource
+creation; UUID identity and dispatch ownership are unchanged. Missing optional
+queue-family dispatch skips timing initialization rather than rejecting an
+otherwise usable session. The simulator retains its downstream-only path even
+when the unused public loader module is absent. No per-frame work is added.
+
+All twenty-six production-function scenarios pass. They cover enable1/enable2,
+cached device selection, requirements/selection failures, UUID mismatch,
+unavailable dispatch, native session failure, format enumeration, reference
+spaces, pool/command/loader-data/fence failures, timing and throwing diagnostics.
+Every tested partial resource set already retires through production shutdown,
+with exactly-once destruction and repeated-shutdown safety. No additional
+rollback mechanism is justified. The six-check raw verbose run passes in 0.21
+seconds, and `QuadRuntime.cpp` compiles.
+
+XR/Vulkan dispatch, loader lookup, GPU completion, actions and pause resources
+are simulated. The fixture includes the production creation/shutdown functions,
+not a linked game startup or native runtime. Separate earlier tests cover pause
+upload and action ownership. SteamVR binding overrides, composition swapchain
+creation, native retry and headset teardown remain to verify. No FPS gain is
+claimed.
 
 ### Session Events and Restart
 
@@ -602,6 +634,9 @@ flat/prepared presentation, session events and shutdown diagnostics. Earlier ful
 snapshots passed 28 checks in 35.38 seconds, 44 in 35.17 seconds and 47 in 35.60
 seconds. The final rebuilt flat/preparation/event target also passes all 115
 scenarios after tightening its failed-end ownership assertion.
+After `cb974b5`, the new twenty-six-scenario session-creation target and five
+related checks pass in 0.21 seconds; the affected layer target also builds.
+The expanded full suite has not yet been rerun.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -612,6 +647,6 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish partial session/swapchain creation and cleanup, then
+Next audit stage: finish composition swapchain creation and cleanup, then
 startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
