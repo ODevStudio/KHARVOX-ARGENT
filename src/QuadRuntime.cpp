@@ -45,6 +45,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <fstream>
+#include <new>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>

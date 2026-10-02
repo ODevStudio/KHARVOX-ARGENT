@@ -1,10 +1,11 @@
 VKAPI_ATTR VkResult VKAPI_CALL runtimeCreateAdapter(VkPhysicalDevice,const VkDeviceCreateInfo* ci,const VkAllocationCallbacks* a,VkDevice* out){
     const auto create=runtimeCreate.load();const auto physical=runtimePhysical.load();const auto downstream=runtimeDownstream.load();
     if(!create||!physical||!ci||!downstream)return VK_ERROR_INITIALIZATION_FAILED;
-    VkDeviceCreateInfo merged=*ci;
-    merged.pNext=downstream->pNext;
-    try{log("[RUNTIME-ENABLE2] vkCreateDevice adapter reattached Vulkan loader chain");}catch(...){}
-    return create(physical,&merged,a,out);
+    try{
+        RuntimeDeviceCreateChain merged(*ci,*downstream);
+        try{log("[RUNTIME-ENABLE2] vkCreateDevice adapter reattached Vulkan loader chain");}catch(...){}
+        return create(physical,&merged.info,a,out);
+    }catch(const std::bad_alloc&){if(out)*out=VK_NULL_HANDLE;return VK_ERROR_OUT_OF_HOST_MEMORY;}
 }
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL runtimeGipa(VkInstance i,const char* name){
     const auto resolved=kharvox::resolveRuntimeVulkanProc(i,name,runtimeSessionRoute.load(),simulator,

@@ -4,15 +4,28 @@
 #include "../src/openxr/RuntimeDeviceCreateChain.h"
 #include "../src/openxr/RuntimeVulkanDispatch.h"
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <new>
 #include <stdexcept>
 
+namespace {
+thread_local bool failNextAllocation{};
+unsigned allocationFailures{};
+}
+void* operator new(std::size_t size) {
+    if(failNextAllocation){failNextAllocation=false;++allocationFailures;throw std::bad_alloc{};}
+    if(auto* memory=std::malloc(size?size:1))return memory;
+    throw std::bad_alloc{};
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory,std::size_t) noexcept { std::free(memory); }
+
 namespace argent {
 namespace {
 enum class Mode { Success, XrFailure, VkFailure, NullSuccess, ThrowNative, SelectionFailure,
-    UuidMismatch, MissingProperties, MissingLoader, Simulator, KhrProperties };
+    UuidMismatch, MissingProperties, MissingLoader, Simulator, KhrProperties, ChainAllocationFailure };
 Mode mode{};
 const char* throwingPrefix="";
 bool throwLog{},failed{},enable2{},simulator{};
@@ -33,6 +46,9 @@ std::atomic<bool> runtimeSessionRoute{};
 const VkDeviceCreateInfo* expectedDownstream{};
 const VkAllocationCallbacks* expectedAllocator{};
 const VkInstanceCreateInfo* expectedInstanceInfo{};
+const VkDeviceCreateInfo* expectedRuntimeInfo{};
+bool addedRuntimeFeatures{};
+unsigned preservedChains{};
 void require(bool condition,const char* message) { if(!condition)throw std::runtime_error(message); }
 template<class T> T handle(std::uintptr_t value) { return reinterpret_cast<T>(value); }
 void check(XrResult result,const char* operation) { if(XR_FAILED(result))throw std::runtime_error(operation); }
@@ -45,8 +61,35 @@ VKAPI_ATTR void VKAPI_CALL fakeProperties(VkPhysicalDevice gpu,VkPhysicalDeviceP
 }
 VKAPI_ATTR VkResult VKAPI_CALL fakeCreateDevice(VkPhysicalDevice physical,const VkDeviceCreateInfo* info,const VkAllocationCallbacks* allocator,VkDevice* out) {
     ++nativeCalls;callbackThread=GetCurrentThreadId();
-    require(physical==handle<VkPhysicalDevice>(4)&&info->pNext==expectedDownstream->pNext
-        &&allocator==expectedAllocator,"Adapter lost the downstream GPU, loader chain or allocator");
+    require(physical==handle<VkPhysicalDevice>(4)&&allocator==expectedAllocator,"Adapter lost the downstream GPU or allocator");
+    if(addedRuntimeFeatures){
+        const auto* original=static_cast<const VkLayerDeviceCreateInfo*>(expectedDownstream->pNext);
+        const auto* originalLink=static_cast<const VkLayerDeviceCreateInfo*>(original->pNext);
+        const auto* callback=static_cast<const VkLayerDeviceCreateInfo*>(info->pNext);
+        require(callback&&callback!=original&&callback->sType==VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO
+            &&callback->function==VK_LOADER_DATA_CALLBACK&&callback->u.pfnSetDeviceLoaderData==original->u.pfnSetDeviceLoaderData,
+            "Adapter lost copied loader callback ownership");
+        auto* link=static_cast<const VkLayerDeviceCreateInfo*>(callback->pNext);
+        require(link&&link!=originalLink&&link->sType==VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO
+            &&link->function==VK_LAYER_LINK_INFO&&link->u.pLayerInfo==originalLink->u.pLayerInfo
+            &&link->pNext==expectedRuntimeInfo->pNext,"Adapter discarded runtime-added features or loader links");
+        const auto* timeline=static_cast<const VkPhysicalDeviceTimelineSemaphoreFeatures*>(link->pNext);
+        require(timeline->timelineSemaphore==VK_TRUE&&timeline->pNext==originalLink->pNext
+            &&info->enabledExtensionCount==expectedRuntimeInfo->enabledExtensionCount
+            &&info->ppEnabledExtensionNames==expectedRuntimeInfo->ppEnabledExtensionNames
+            &&info->queueCreateInfoCount==expectedRuntimeInfo->queueCreateInfoCount
+            &&info->pQueueCreateInfos==expectedRuntimeInfo->pQueueCreateInfos,"Runtime features, extensions or queues changed");
+        const auto* appFeatures=static_cast<const VkPhysicalDeviceFeatures2*>(timeline->pNext);
+        const auto* views=static_cast<const VkPhysicalDeviceMultiviewFeatures*>(appFeatures->pNext);
+        require(appFeatures->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2&&views
+            &&views->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES&&views->multiview==VK_TRUE,
+            "Runtime merge lost application multiview features");
+        ++preservedChains;
+        const_cast<VkLayerDeviceCreateInfo*>(link)->u.pLayerInfo=nullptr;
+        const_cast<VkLayerDeviceCreateInfo*>(callback)->pNext=nullptr;
+        auto* features=reinterpret_cast<VkBaseOutStructure*>(const_cast<void*>(originalLink->pNext));
+        features->pNext=nullptr;
+    }else require(info->pNext==expectedDownstream->pNext,"Adapter lost the feature-only chain");
     if(mode==Mode::VkFailure){*out=VK_NULL_HANDLE;return VK_ERROR_OUT_OF_DEVICE_MEMORY;}
     if(mode==Mode::NullSuccess){*out=VK_NULL_HANDLE;return VK_SUCCESS;}
     ++createdDevices;*out=handle<VkDevice>(50);return VK_SUCCESS;
@@ -89,13 +132,21 @@ XrResult fake_xrCreateVulkanDeviceKHR(XrInstance,const XrVulkanDeviceCreateInfoK
         &&info->vulkanAllocator==expectedAllocator&&runtimeDownstream.load()==expectedDownstream
         &&runtimePhysical.load()==handle<VkPhysicalDevice>(4)&&!runtimeSessionRoute.load(),"UUID or callback ownership was bypassed");
     auto* head=reinterpret_cast<VkBaseOutStructure*>(const_cast<void*>(expectedDownstream->pNext));
-    head->pNext=nullptr;
+    if(!addedRuntimeFeatures)head->pNext=nullptr;
     if(mode==Mode::ThrowNative)throw std::runtime_error("native creation threw");
     if(mode==Mode::XrFailure){*out=VK_NULL_HANDLE;*result=VK_SUCCESS;return XR_ERROR_RUNTIME_FAILURE;}
+    auto runtime=*info->vulkanCreateInfo;
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+    timeline.timelineSemaphore=VK_TRUE;timeline.pNext=const_cast<void*>(runtime.pNext);
+    const char* extensions[]{"VK_KHR_swapchain","VK_KHR_timeline_semaphore"};
+    float priority=1;VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};queue.queueCount=1;queue.pQueuePriorities=&priority;
+    if(addedRuntimeFeatures){runtime.pNext=&timeline;runtime.enabledExtensionCount=2;runtime.ppEnabledExtensionNames=extensions;
+        runtime.queueCreateInfoCount=1;runtime.pQueueCreateInfos=&queue;expectedRuntimeInfo=&runtime;}
     *result=xrWorker().invoke([&]{
         const auto create=reinterpret_cast<PFN_vkCreateDevice>(info->pfnGetInstanceProcAddr(handle<VkInstance>(3),"vkCreateDevice"));
         require(create==runtimeCreateAdapter,"Runtime did not receive the armed adapter");
-        return create(info->vulkanPhysicalDevice,info->vulkanCreateInfo,info->vulkanAllocator,out);
+        failNextAllocation=mode==Mode::ChainAllocationFailure;
+        return create(info->vulkanPhysicalDevice,&runtime,info->vulkanAllocator,out);
     });
     return XR_SUCCESS;
 }
@@ -112,8 +163,10 @@ void reset(Mode value,const char* prefix,bool steam=false) {
     runtimeNext=nullptr;runtimeGdpa=nullptr;runtimeDevice=VK_NULL_HANDLE;runtimeCreate=nullptr;
     runtimePhysical=VK_NULL_HANDLE;runtimeDownstream=nullptr;runtimeSessionRoute=false;
     instanceCalls=deviceCalls=nativeCalls=createdInstances=createdDevices=propertiesCalls=logsThrown=0;callbackThread=0;
+    addedRuntimeFeatures=false;preservedChains=allocationFailures=0;expectedRuntimeInfo=nullptr;
 }
-VkResult expectedResult(Mode value) { return success(value)?VK_SUCCESS:value==Mode::VkFailure?VK_ERROR_OUT_OF_DEVICE_MEMORY:VK_ERROR_INITIALIZATION_FAILED; }
+VkResult expectedResult(Mode value) { return success(value)?VK_SUCCESS:value==Mode::VkFailure?VK_ERROR_OUT_OF_DEVICE_MEMORY:
+    value==Mode::ChainAllocationFailure?VK_ERROR_OUT_OF_HOST_MEMORY:VK_ERROR_INITIALIZATION_FAILED; }
 void runInstance(Mode value,const char* prefix) {
     reset(value,prefix);
     VkInstanceCreateInfo info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};VkAllocationCallbacks allocator{};
@@ -127,16 +180,23 @@ void runInstance(Mode value,const char* prefix) {
         &&instanceCalls==1,"Successful instance ownership was lost or failed output survived");
     std::cout<<"instance mode="<<int(value)<<" log="<<(prefix?prefix:"none")<<" result="<<result<<" owned="<<createdInstances<<'\n';
 }
-void runDevice(Mode value,const char* prefix,bool steam) {
+void runDevice(Mode value,const char* prefix,bool steam,bool runtimeFeatures=false) {
     reset(value,prefix,steam);
+    addedRuntimeFeatures=runtimeFeatures;
     VkPhysicalDeviceFeatures2 head{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    VkPhysicalDeviceMultiviewFeatures tail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};head.pNext=&tail;
+    VkPhysicalDeviceMultiviewFeatures tail{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES};tail.multiview=VK_TRUE;head.pNext=&tail;
     VkDeviceCreateInfo downstream{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};downstream.pNext=&head;
+    VkLayerDeviceLink loaderLink{};
+    VkLayerDeviceCreateInfo link{VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO};link.function=VK_LAYER_LINK_INFO;link.u.pLayerInfo=&loaderLink;link.pNext=&head;
+    VkLayerDeviceCreateInfo callback{VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO};callback.function=VK_LOADER_DATA_CALLBACK;callback.pNext=&link;
+    callback.u.pfnSetDeviceLoaderData=+[](VkDevice,void*)->VkResult{return VK_SUCCESS;};
+    if(runtimeFeatures)downstream.pNext=&callback;
     const auto runtime=downstream;VkAllocationCallbacks allocator{};
+    auto runtimeWithoutLoader=runtime;if(runtimeFeatures)runtimeWithoutLoader.pNext=&head;
     expectedDownstream=&downstream;expectedAllocator=&allocator;
     VkDevice output=handle<VkDevice>(90);VkResult result=VK_SUCCESS;
     bool handled{},escaped{};
-    try { handled=xrCreateGameDevice(fakeNext,fakeDeviceProc,handle<VkInstance>(3),handle<VkPhysicalDevice>(4),&runtime,&downstream,&allocator,&output,result); }
+    try { handled=xrCreateGameDevice(fakeNext,fakeDeviceProc,handle<VkInstance>(3),handle<VkPhysicalDevice>(4),&runtimeWithoutLoader,&downstream,&allocator,&output,result); }
     catch(...) { escaped=true; }
     require(!escaped&&handled&&result==expectedResult(value),"Device result or diagnostic escaped its boundary");
     require(output==(success(value)?handle<VkDevice>(50):VK_NULL_HANDLE)&&createdDevices==unsigned(success(value)),
@@ -146,10 +206,18 @@ void runDevice(Mode value,const char* prefix,bool steam) {
     require(runtimeSelectedPhysical==(success(value)?handle<VkPhysicalDevice>(2):VK_NULL_HANDLE)
         &&runtimeSessionRoute.load()==(success(value)&&steam),"Failed device published session routing");
     if(success(value))require(nativeCalls==1&&callbackThread!=GetCurrentThreadId(),"Creation did not cross the production worker callback");
+    if(runtimeFeatures){
+        require(callback.pNext==&link&&link.pNext==&head&&link.u.pLayerInfo==&loaderLink,
+            "Native creation mutated the original loader records");
+        require(preservedChains==unsigned(value!=Mode::ChainAllocationFailure)
+            &&allocationFailures==unsigned(value==Mode::ChainAllocationFailure),"Runtime chain preservation or allocation rejection was not exercised");
+        if(value==Mode::ChainAllocationFailure)require(!nativeCalls,"Allocation failure reached native device creation");
+    }
     if(value==Mode::SelectionFailure||value==Mode::UuidMismatch||value==Mode::MissingProperties||value==Mode::MissingLoader)
         require(!deviceCalls&&!nativeCalls&&!createdDevices,"Unavailable UUID verification created a device");
     std::cout<<"device mode="<<int(value)<<" steam="<<steam<<" log="<<(prefix?prefix:"none")
-        <<" result="<<result<<" owned="<<createdDevices<<" logsThrown="<<logsThrown<<'\n';
+        <<" result="<<result<<" owned="<<createdDevices<<" logsThrown="<<logsThrown<<" runtimeFeatures="<<runtimeFeatures
+        <<" preserved="<<preservedChains<<" allocationFailures="<<allocationFailures<<'\n';
 }
 void runBinding(bool diagnostic) {
     reset(Mode::Success,diagnostic?"[RUNTIME-ENABLE2] retained":nullptr);
@@ -204,6 +272,9 @@ int main() {
             run([&]{argent::runDevice(mode,"XR_VULKAN_DEVICE ",steam);});
         run([&]{argent::runDevice(argent::Mode::ThrowNative,"native creation threw",steam);});
         run([&]{argent::runDevice(argent::Mode::UuidMismatch,"XR GPU UUID",steam);});
+        for(const auto mode:{argent::Mode::Success,argent::Mode::VkFailure,argent::Mode::NullSuccess,argent::Mode::ChainAllocationFailure})
+            run([&]{argent::runDevice(mode,nullptr,steam,true);});
+        run([&]{argent::runDevice(argent::Mode::Success,"[RUNTIME-ENABLE2] vkCreateDevice adapter",steam,true);});
     }
     for(const bool diagnostic:{false,true})run([&]{argent::runBinding(diagnostic);});
     for(const bool nullName:{false,true})run([&]{argent::runLookup(nullName);});
