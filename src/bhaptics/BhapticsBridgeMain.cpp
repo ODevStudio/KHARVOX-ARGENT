@@ -15,6 +15,7 @@
 #include "BhapticsIpcProtocol.h"
 #include "BhapticsMappingPolicy.h"
 #include "BhapticsSdkBackend.h"
+#include "../common/OverlappedIo.h"
 
 namespace {
 
@@ -205,11 +206,10 @@ HANDLE createAndConnectPipe(const std::wstring& path,
             CloseHandle(pipe);
             return INVALID_HANDLE_VALUE;
         }
-        if (wait == WAIT_OBJECT_0 + 1)
+        if (wait != WAIT_TIMEOUT)
             break;
     }
-    CancelIoEx(pipe, &overlapped);
-    WaitForSingleObject(overlapped.hEvent, 50);
+    kharvox::cancelAndDrainOverlappedIo(pipe, overlapped);
     CloseHandle(overlapped.hEvent);
     CloseHandle(pipe);
     return INVALID_HANDLE_VALUE;
@@ -234,8 +234,7 @@ bool readExact(HANDLE pipe, HANDLE parent, void* destination,
             if (wait == WAIT_OBJECT_0)
                 success = GetOverlappedResult(pipe, &overlapped, &read, FALSE) != FALSE;
             else {
-                CancelIoEx(pipe, &overlapped);
-                WaitForSingleObject(overlapped.hEvent, 50);
+                kharvox::cancelAndDrainOverlappedIo(pipe, overlapped);
                 success = false;
             }
         }

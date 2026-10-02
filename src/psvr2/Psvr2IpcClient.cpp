@@ -8,6 +8,7 @@
 #include <string>
 
 #include "Psvr2IpcProtocol.h"
+#include "../common/OverlappedIo.h"
 
 namespace {
 
@@ -71,8 +72,7 @@ bool writeWithTimeout(HANDLE pipe, const void* data, DWORD bytes) {
         if (wait == WAIT_OBJECT_0)
             success = GetOverlappedResult(pipe, &overlapped, &written, FALSE) != FALSE;
         else {
-            CancelIoEx(pipe, &overlapped);
-            WaitForSingleObject(overlapped.hEvent, 50);
+            kharvox::cancelAndDrainOverlappedIo(pipe, overlapped);
             success = false;
         }
     }
