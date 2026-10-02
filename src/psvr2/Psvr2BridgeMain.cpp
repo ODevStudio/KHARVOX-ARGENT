@@ -301,6 +301,26 @@ DWORD WINAPI pipeThreadMain(void* rawContext) {
     return 0;
 }
 
+struct PipeThread {
+    HANDLE handle{};
+    explicit PipeThread(HANDLE value) noexcept : handle(value) {}
+    PipeThread(const PipeThread&) = delete;
+    PipeThread& operator=(const PipeThread&) = delete;
+    ~PipeThread() { stop(); }
+
+    void stop() noexcept {
+        if (!handle) return;
+        shutdownRequested.store(true, std::memory_order_release);
+        SetEvent(shutdownEvent);
+        if (WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0) {
+            RaiseFailFastException(nullptr, nullptr, 0);
+            std::abort();
+        }
+        CloseHandle(handle);
+        handle = nullptr;
+    }
+};
+
 int applyDesired(kharvox::psvr2::Psvr2ToolkitBackend& backend,
     const kharvox::psvr2::TriggerCommand& command,
     bool clearBothFirst) {
@@ -400,9 +420,9 @@ int wmain() {
 
         PipeThreadContext pipeContext{
             L"\\\\.\\pipe\\" + pipeName, token, &security.attributes, parent};
-        HANDLE pipeThread = CreateThread(nullptr, 0, pipeThreadMain,
-            &pipeContext, 0, nullptr);
-        if (!pipeThread) {
+        PipeThread pipeThread{CreateThread(nullptr, 0, pipeThreadMain,
+            &pipeContext, 0, nullptr)};
+        if (!pipeThread.handle) {
             CloseHandle(shutdownEvent);
             CloseHandle(parent);
             return 6;
@@ -522,8 +542,7 @@ int wmain() {
         SetEvent(shutdownEvent);
         backend.shutdown();
         backend.unload();
-        WaitForSingleObject(pipeThread, 2000);
-        CloseHandle(pipeThread);
+        pipeThread.stop();
         CloseHandle(shutdownEvent);
         shutdownEvent = nullptr;
         CloseHandle(parent);
