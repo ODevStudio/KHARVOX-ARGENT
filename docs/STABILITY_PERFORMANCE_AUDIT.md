@@ -24,7 +24,7 @@ and record them here after each subsystem.
 
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
-and `5d121be`.
+`5d121be`, and `ae440fb`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -42,7 +42,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
 | Hand/depth rendering and HUD | Hand and pause-texture retirement fixed; wider HUD review pending | Verified uploads and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Hand GPU/layout tests and five pause-upload call-site scenarios pass; wider HUD/input paths remain to inspect. |
-| OpenXR frame loop and image handoff | Retirement failures fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Three focused checks pass; frame/session state, creation failures and runtime recovery remain to inspect. |
+| OpenXR frame loop and image handoff | Retirement and stereo-begin exception paths fixed; wider lifecycle review in progress | Verify GPU retirement before releasing borrowed depth/source leases, flat-copy XR images, or shutdown resources. Twenty production stereo-begin scenarios pass, including throwing diagnostics; flat/prepared frames, session/events, creation failures and runtime recovery remain to inspect. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Eye-readback retirement fixed; broader capture review pending | Production readback now rejects unsafe cleanup after a failed recovery wait. Six isolated call-site scenarios and real GPU pixel export pass. Disabled-path overhead and other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC cancellation, worker join and client restart races fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Six original stop/restart regressions fail before the fix; 14 affected checks pass afterward. State restoration, broader input, per-frame work and complete unload remain to inspect. |
@@ -63,8 +63,37 @@ payloads still retire GPU use before overwriting the single buffer.
 | `e893499` | bHaptics/PSVR2 IPC clients and bridges | Stability | Drain cancelled overlapped operations before releasing stack storage, buffers and events. Stop connection waits after terminal wait errors. Four production-call-site regressions fail with the original 50 ms cleanup and pass with delayed completion; native Windows pipe cancellation also passes. |
 | `6782cf1` | PSVR2 bridge worker ownership | Stability | Scope-own the pipe worker and require thread exit before releasing its context, security storage or wait handles. Normal and injected-exception delayed-worker regressions fail on the original implementation and pass after the fix; thread-start failure still returns the existing error. |
 | `2b9cad1` | bHaptics/PSVR2 client worker lifetime | Stability | Serialize start, stop signaling and final handle retirement; retain a thread handle so quick session restart can verify the previous worker's exit. Publish started state only after configuration/event setup. Six stop/restart regressions reproduce the original races; lifecycle, startup-failure and existing cancellation checks pass after the fix. |
+| `096a91f` | OpenXR stereo frame begin | Stability | Publish begun-frame ownership and predicted display time before SteamVR diagnostics; mark failure and cancel before guarded failure logging. Four original throwing-log scenarios fail; all twenty production-function scenarios and three existing lifetime/retirement checks pass after the fix. |
 
 ## Subsystem Evidence
+
+### Stereo Frame Begin
+
+After successful `xrBeginFrame`, SteamVR diagnostics previously ran before
+publishing `stereoPending.begun` and its predicted display time. A logging or
+string-allocation exception could therefore leave a native frame untracked.
+The exception handler also logged before cancellation; a second logging failure
+could escape without either retiring the frame or marking the runtime failed.
+
+Frame ownership is now published immediately after successful begin, before
+diagnostics or action updates. On failure, the handler marks the runtime failed,
+attempts cancellation, then guards its diagnostic against exceptions. Normal
+wait/begin/end ordering and wait counts are unchanged. The two production
+functions were moved into an include so the fixture executes their actual code.
+
+Twenty Steam/non-Steam scenarios cover normal frames, no-render, invalid view
+tracking, wait/begin/action/locate/end errors, begin-log failure, failure-log
+failure, and both logs failing. Four scenarios reject the original behavior:
+SteamVR begin logging abandons a begun frame, and failure logging escapes on
+both runtime paths. After the fix, all twenty pass, verifying exactly-once
+cancellation, display time and terminal/retryable state. The new check plus
+`native_xr_release`, `game_image_lifetime`, and `gpu_retirement` pass in 1.03
+seconds; the production layer compile target also builds.
+
+XR dispatch and peripheral actions are simulated, and worker invocation is
+inline in this fixture. It does not establish real worker/headset behavior,
+flat/prepared frame recovery, session events or partial creation. This is an
+exception-path stability fix, not an FPS optimization.
 
 ### IPC Cancellation Lifetime
 
@@ -374,11 +403,10 @@ SFS, hand rendering, FSR and all four IPC translation units. Its final raw CTest
 run passed all 28 checks in 35.38 seconds, including queue concurrency, hand
 retirement, the shared XR retirement gate, production readback/pause-upload
 failure checks, broader shader/negotiation coverage, launcher subprocesses and
-IPC cancellation checks.
-After `6782cf1`, the affected PSVR2 IPC check and three new bridge-thread checks
-also pass. After `2b9cad1`, twelve new lifecycle checks and both affected client
-cancellation checks pass. The expanded 43-check harness has not yet been run as
-one combined suite; the 28-check run above predates these ownership follow-ups.
+IPC cancellation checks. After `096a91f`, a fresh complete focused harness build
+and raw verbose CTest run passed all 44 checks in 35.17 seconds. This includes
+the three bridge-thread checks, twelve IPC client lifecycle checks and twenty
+stereo-begin scenarios added after the earlier 28-check run.
 Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
 are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
 handle conversion warning. These focused results do not prove the full audit
@@ -389,7 +417,7 @@ A real 120-300 second
 combat capture with the desktop mirror disabled is required to quantify FPS,
 CPU/GPU bottlenecks, and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: finish XR session/events and
+Next audit stage: finish XR flat/prepared frame recovery, session/events and
 partial-creation cleanup, then
 startup/launcher/device negotiation, broader SFS shader variants, HUD/game hooks,
 input/integrations and diagnostics. No full-audit completion is claimed.
