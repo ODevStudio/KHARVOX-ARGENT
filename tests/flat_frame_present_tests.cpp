@@ -12,7 +12,7 @@ namespace argent {
 namespace {
 enum class Scenario { Normal, NoRender, SwapchainFailure, WaitFailure, BeginFailure,
     AcquireFailure, ImageWaitFailure, ResetFailure, SubmitFailure, FenceFailure,
-    ReleaseFailure, EndFailure, PreparedLogFailure };
+    ReleaseFailure, EndFailure, PreparedLogFailure, PrepareLogFailure, RepeatedAcquireLogFailure, EventFailure };
 Scenario scenario{};
 bool failureLog{}, nativeOpen{}, gpuLive{}, imageOwned{}, imageWaited{}, failed{}, running{true};
 bool steamFramePrepared{}, steamFrameBegun{}, pauseBindingsReady{};
@@ -37,7 +37,7 @@ XrSessionState sessionState=XR_SESSION_STATE_FOCUSED;
 kharvox::OpenXRRuntimeKind runtimeKind{};
 XrFrameState steamPreparedFrame{XR_TYPE_FRAME_STATE};
 uint64_t steamVrNativePresentDeferrals{}, steamOrderViolations{}, steamWaitCalls{}, steamBeginCalls{};
-uint64_t steamEndCalls{}, steamConsumedPreparedFrames{}, frames{};
+uint64_t steamEndCalls{}, steamConsumedPreparedFrames{}, steamPreparedFrames{}, steamRepeatedAcquires{}, frames{};
 struct Timing {
     void begin(VkCommandBuffer,bool) {}
     void end(VkCommandBuffer) {}
@@ -53,7 +53,7 @@ struct Bridge {
 } bridge;
 namespace presentation { bool pauseRootVisible() { return false; } }
 XrCompositionLayerQuad pauseBindingsLayer(const XrCompositionLayerQuad& quad) { return quad; }
-void events() {}
+void events() { if(scenario==Scenario::EventFailure)throw std::runtime_error("event failure"); }
 void startSession(Device&,VkQueue,uint32_t,uint32_t) { throw std::runtime_error("Unexpected session creation"); }
 void createSwapchain(const Source&) {
     if(scenario==Scenario::SwapchainFailure)throw std::runtime_error("swapchain failure");
@@ -135,23 +135,29 @@ VkResult fake_vkWaitForFences(VkDevice,uint32_t,const VkFence*,VkBool32,uint64_t
 VkResult fake_vkDeviceWaitIdle(VkDevice) { ++deviceWaits;gpuLive=false;return VK_SUCCESS; }
 }
 void log(const std::string& message) {
-    if((failureLog&&message.rfind("QUAD_DISABLED ",0)==0)
-        ||(scenario==Scenario::PreparedLogFailure&&message.rfind("[STEAM-XR-SPLIT] consumed=",0)==0))
+    if((failureLog&&(message.rfind("QUAD_DISABLED ",0)==0||message.rfind("[STEAM-XR-SPLIT] prepare failed: ",0)==0))
+        ||(scenario==Scenario::PreparedLogFailure&&message.rfind("[STEAM-XR-SPLIT] consumed=",0)==0)
+        ||(scenario==Scenario::PrepareLogFailure&&message.rfind("[STEAM-XR-SPLIT] prepared=",0)==0)
+        ||(scenario==Scenario::RepeatedAcquireLogFailure&&message.rfind("[STEAM-XR-SPLIT] acquire arrived ",0)==0)
+        ||(failureLog&&scenario==Scenario::WaitFailure&&message.rfind("[STEAM-XR-SPLIT] xrWaitFrame result=",0)==0)
+        ||(failureLog&&scenario==Scenario::BeginFailure&&message.rfind("[STEAM-XR-SPLIT] xrBeginFrame result=",0)==0))
         throw std::bad_alloc{};
 }
-namespace {
 #define XR(name) fake_##name
+#include "../src/PreparedFrame.inc"
+namespace {
 #define VK(name) fake_##name
 #include "../src/FlatFramePresent.inc"
 #undef VK
 #undef XR
 
-void run(Scenario mode,bool steam,bool prepared,bool throwLog) {
+void resetFrame(Scenario mode,bool steam,bool throwLog) {
     scenario=mode;
     failureLog=throwLog;
     nativeOpen=gpuLive=imageOwned=imageWaited=failed=steamFramePrepared=steamFrameBegun=false;
     waits=begins=ends=releases=submits=deviceWaits=0;
     frames=steamOrderViolations=steamWaitCalls=steamBeginCalls=steamEndCalls=steamConsumedPreparedFrames=0;
+    steamPreparedFrames=steamRepeatedAcquires=0;running=true;
     endedTime=0;
     callerThread=GetCurrentThreadId();lifecycleThread=0;
     runtimeKind=steam?kharvox::OpenXRRuntimeKind::SteamVR:kharvox::OpenXRRuntimeKind::Unknown;
@@ -160,6 +166,9 @@ void run(Scenario mode,bool steam,bool prepared,bool throwLog) {
     device.graphicsQueue=boundQueue=handle<VkQueue>(6);command=handle<VkCommandBuffer>(7);
     fence=handle<VkFence>(8);
     images={{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR,nullptr,handle<VkImage>(9)}};
+}
+void run(Scenario mode,bool steam,bool prepared,bool throwLog) {
+    resetFrame(mode,steam,throwLog);
     Source source;
     source.extent=extent;
     source.images={handle<VkImage>(10)};
@@ -198,6 +207,38 @@ void run(Scenario mode,bool steam,bool prepared,bool throwLog) {
     std::cout<<"steam="<<steam<<" prepared="<<prepared<<" failureLog="<<throwLog<<" scenario="<<int(mode)
         <<" calls="<<waits<<'/'<<begins<<'/'<<ends<<" released="<<releases<<" consumed="<<result<<'\n';
 }
+void runPreparation(Scenario mode,bool throwLog) {
+    resetFrame(mode,true,throwLog);
+    bool escaped{};
+    try {
+        prepareSteamFrame(device,handle<VkSwapchainKHR>(12));
+        if(mode==Scenario::RepeatedAcquireLogFailure)prepareSteamFrame(device,handle<VkSwapchainKHR>(12));
+    }catch(...) { escaped=true; }
+    require(!escaped,"Preparation diagnostic escaped the successful Vulkan acquire");
+    const bool waited=mode!=Scenario::EventFailure;
+    const bool began=waited&&mode!=Scenario::WaitFailure;
+    const bool prepared=began&&mode!=Scenario::BeginFailure;
+    require(waits==unsigned(waited)&&begins==unsigned(began)&&!ends,"Preparation changed frame ordering");
+    require(steamWaitCalls==waits&&steamBeginCalls==begins&&steamPreparedFrames==unsigned(prepared),
+        "Preparation counters lost native lifecycle calls");
+    require(steamFramePrepared==prepared&&steamFrameBegun==prepared&&nativeOpen==prepared,
+        "Preparation lost native frame ownership");
+    require(steamRepeatedAcquires==unsigned(mode==Scenario::RepeatedAcquireLogFailure),
+        "Repeated acquire created a second frame");
+    if(prepared) {
+        require(steamPreparedFrame.predictedDisplayTime==displayTime,"Preparation lost predicted display time");
+        scenario=mode==Scenario::NoRender?mode:Scenario::Normal;failureLog=false;
+        Source source;source.extent=extent;source.images={handle<VkImage>(10)};
+        VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        const auto consumed=presentQuadImpl(device,boundQueue,0,0,source,0,present);
+        require(!failed&&!nativeOpen&&!steamFramePrepared&&!steamFrameBegun&&ends==1&&endedTime==displayTime,
+            "A production-prepared frame was not presented exactly once");
+        require(consumed==(mode!=Scenario::NoRender)&&waits==1&&begins==1&&steamConsumedPreparedFrames==1,
+            "Presentation waited/began a second frame instead of consuming preparation");
+    }
+    std::cout<<"preparation scenario="<<int(mode)<<" failureLog="<<throwLog
+        <<" calls="<<waits<<'/'<<begins<<'/'<<ends<<'\n';
+}
 }
 }
 
@@ -219,6 +260,18 @@ int main() {
                     std::cerr<<"steam="<<route[0]<<" prepared="<<route[1]<<" failureLog="<<throwLog
                         <<" scenario="<<int(mode)<<": "<<error.what()<<'\n';
                 }
+            }
+        }
+    }
+    for(const auto mode:{argent::Scenario::Normal,argent::Scenario::NoRender,argent::Scenario::WaitFailure,
+        argent::Scenario::BeginFailure,argent::Scenario::PrepareLogFailure,
+        argent::Scenario::RepeatedAcquireLogFailure,argent::Scenario::EventFailure}) {
+        for(const bool throwLog:{false,true}) {
+            ++scenarios;
+            try { argent::runPreparation(mode,throwLog); }
+            catch(const std::exception& error) {
+                ++failures;
+                std::cerr<<"preparation scenario="<<int(mode)<<" failureLog="<<throwLog<<": "<<error.what()<<'\n';
             }
         }
     }
