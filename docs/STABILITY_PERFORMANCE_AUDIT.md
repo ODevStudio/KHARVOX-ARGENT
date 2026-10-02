@@ -36,7 +36,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Game interception, SFS shaders and command replay | In progress | Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer layer remain to verify. |
 | SFS frame publication and stereo source ownership | Queue deadlock fixed; runtime verification pending | Six fresh checks pass, including bounded exhausted-acquire/present concurrency, queue-submit exclusion, fence-wait independence, publication failures, unchanged-payload metadata progression, completion-gated retirement, and real GPU source recreation. Keep changed-payload device retirement; asynchronous uniform slots need a separate lifetime design and runtime evidence. |
 | FSR1 | Pending | Inspect direct sampling, fallback, image barriers, resize, and failure cleanup. |
-| Hand/depth rendering and HUD | Pending | Inspect borrowed game depth and owned framebuffers, resource reuse, and retirement. |
+| Hand/depth rendering and HUD | Upload/shutdown retirement fixed; wider HUD review pending | Verified upload and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Four focused checks pass, including five isolated failure/device-loss scenarios and both stereo GPU layouts; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Pending | Inspect frame/session state, acquire/wait/release, queue/fence failures, and shutdown. |
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Pending | Inspect disabled-path overhead and resource/readback lifetime. |
@@ -49,6 +49,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | --- | --- | --- | --- |
 | `aabbdb5` | Desktop mirror | Stability | Failure quarantine, verified error-path source retirement, queue-serialized destruction, and cleared handles. Failure-injection test reproduced a double-destruction on the original implementation, then passed after the fix. `ArgentLayer.cpp` compiled. |
 | `08c2ae7` | SFS source ownership and queue synchronization | Stability | Move shared queue locking into actual source-ring submissions. An exhausted acquire no longer holds the queue mutex needed by present to release a slot. Bounded concurrency regression reproduced the old entry-point lock schedule, then passed after moving the lock; five GPU checks also pass. |
+| `cbb995d` | Hand texture uploads and renderer teardown | Stability | Validate queue retirement before freeing upload staging or renderer resources; reject failed upload-command reset and missing upload dispatch functions. Isolated GPU-backed checks distinguish fail-fast retirement from unsafe destruction, and allow device-loss cleanup. Existing array-eye/separate-eye rendering and framebuffer reuse checks pass. |
 
 ## Subsystem Evidence
 
@@ -94,6 +95,37 @@ SFS runtime compiled. Production call sites were inspected for opposing outer
 locks; the concurrency test exercises the ring and modeled caller schedule,
 not a linked game-layer or headset integration. No new average-FPS claim follows
 from this stability fix.
+
+### Hand Rendering and Resource Retirement
+
+The texture upload path previously freed staging immediately when a successful
+submission was followed by a failed queue-idle wait. Renderer shutdown likewise
+ignored the wait result before destroying command pools, framebuffers, depth
+copies and assets. Both now use the same checked retirement path. Success allows
+normal cleanup; device loss permits teardown but does not mark an upload usable.
+A different retirement error fails fast before destroying potentially live
+resources. This deliberately prevents unsafe continuation rather than claiming
+recovery from an unretired GPU submission. Production initialization/destruction
+already hold the shared device queue mutex. The normal number of waits is unchanged.
+
+The upload command reset result is now checked before recording, and required
+upload/reset/wait functions are validated before common resources are created.
+The affected model is disabled on a reset failure; other usable models retain
+the existing partial-availability behavior.
+
+`hand_renderer_retirement` runs five bounded, hidden child checks: upload wait
+failure, shutdown wait failure, command-reset failure, upload device loss, and
+shutdown device loss. The original upload code hit the unsafe-destruction guard
+and failed the new check; shutdown/reset guards also rejected the original paths.
+After the fix, both non-device-loss retirement errors produce the expected
+fail-fast status before destruction, while reset/device-loss checks exit normally.
+The injected errors follow a real successful GPU wait, so no actual device loss
+or memory-pressure recovery is claimed. `hand_renderer_gpu`,
+`hand_renderer_separate_eyes_gpu`, and `hand_scene_framebuffers` also pass, covering
+both eye layouts, scene-depth preservation, reverse depth, HUD masking/placeholder
+pixels, laser visibility, cached framebuffer reuse and matched destruction.
+The hand renderer and both outer layer translation units compile in the focused
+harness. This fix adds no per-frame work or quantified FPS gain.
 
 ## Verification Limits
 
