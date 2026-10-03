@@ -25,7 +25,7 @@ and record them here after each subsystem.
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, and `1b2d47a`.
+`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, `1b2d47a`, and `b21fe2d`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -47,7 +47,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
 | Diagnostics and capture | Frame reporting and eye-readback retirement fixed; broader capture review pending | Frame timing contains diagnostic exceptions, including stack unwinding. Timeline reporting clears its bounded record window before formatting and rejects failed streams. Eleven focused checks cover allocation failure, full/timed-window recovery and unchanged disabled behavior. Production readback rejects unsafe cleanup after a failed recovery wait; six isolated call-site scenarios and real GPU pixel export pass. Other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC ownership and controller teardown exceptions fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Controller cleanup now reaches both IPC stop requests and input clearing despite optional shutdown failures. Eight original controller regressions fail; twenty fixed lifecycle scenarios and native IPC restart checks pass. State restoration, broader input, per-frame work and complete unload remain to inspect. |
-| Build, test, packaging, and end-to-end verification | Focused build passes; probe fixture failure under investigation | Seventy-seven of seventy-eight checks pass in 44.96 seconds, including eleven frame-diagnostics checks. The launcher flood fixture failed its output-limit assertion under a 200 ms deadline; the failure reason still needs confirmation. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
+| Build, test, packaging, and end-to-end verification | All focused checks pass; package and native verification pending | All seventy-eight checks pass in 44.41 seconds. A delayed writer reproduces the launcher fixture's competing timeout; test-only prebuffering now isolates the unchanged production byte cap. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
 
 ## New Audit Commits
 
@@ -80,12 +80,14 @@ payloads still retire GPU use before overwriting the single buffer.
 | `01c0b4c` | SFS initialization / uniform and query-resource ownership | Stability | Preserve successful registration despite diagnostic exceptions; include state allocation in the handler and retire failed setup before guarded logging. Twelve original regressions fail on RTX 4090; all fourteen setup checks and the full sixty-six-check suite pass. Detailed evidence is linked below. |
 | `f80b764` | Startup / outer Vulkan device registration and teardown | Stability | Keep native ownership local through registration/binding; check required dispatch, track SFS ownership before post-setup, roll back attempted camera activation and cache native destruction. Fifty-two original cases fail; all sixty-two production-entry-point scenarios pass. The full sixty-seven-check suite passes; detailed evidence is linked below. |
 | `cd82f29` | Frame diagnostics / timing and presentation history | Stability | Contain destructor logging/allocation failures, reset bounded report windows before formatting and drop failed streams. Original checks reproduce process termination and retained `count=256`; four stronger cases expose incomplete output. Eleven focused checks pass, including fifty-seven timeline allocation boundaries and exception unwinding. |
+| `9ca477c` | Launcher verification / probe output collection | Stability (tests) | Prebuffer more than the unchanged 1 MiB cap before the flood collection deadline; retain strict termination/time bounds and add a delayed writer. The previous fixture rejects a valid timeout after 300 ms startup delay. All five subprocess cases and the full seventy-eight-check suite pass. |
 
 ## Subsystem Evidence
 
 SFS setup ownership: [detailed GPU-backed evidence](SFS_SETUP_OWNERSHIP_AUDIT.md).
 Outer device setup/teardown: [ownership and failure-injection evidence](DEVICE_SETUP_OWNERSHIP_AUDIT.md).
 Frame diagnostics: [bounded-buffer and exception recovery](FRAME_DIAGNOSTICS_AUDIT.md).
+Probe fixture: [scheduling regression and deterministic byte-cap check](PROBE_FIXTURE_AUDIT.md).
 
 ### Outer Vulkan Instance Ownership
 
@@ -775,10 +777,10 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 
 The focused harness has compiled `ArgentLayer.cpp`, `QuadRuntime.cpp`,
 SFS, hand rendering, FSR, the launcher and all four IPC translation units.
-With frame-diagnostics fix `cd82f29`, the full CTest run passes 77 of 78 checks
-in 44.96 seconds. The launcher flood fixture failed its output-limit assertion;
-its suspected 200 ms deadline race needs confirmation. Eleven diagnostics checks pass
-in 0.22 seconds. Related raw verbose checks cover thirty-five outer instance,
+With fixture correction `9ca477c`, all 78 CTest checks pass in 44.41 seconds.
+The previous diagnostics checkpoint passed 77 of 78; detailed subsystem notes
+retain that failure and distinguish it from the reproduced scheduling race.
+Related raw verbose checks cover eleven diagnostics checks, thirty-five outer instance,
 sixty-eight runtime creation and sixty-two outer device scenarios. Coverage
 includes queue concurrency and GPU-backed shader/rendering checks,
 GPU lifetime gates, readback/pause upload, launcher subprocesses, IPC cancellation
@@ -787,14 +789,12 @@ flat/prepared presentation, session events, partial session/swapchain creation
 and shutdown diagnostics, plus fourteen GPU-backed SFS setup/ownership checks.
 The frame/session fixtures cover 115 flat/preparation/event and fifty-eight
 session/swapchain scenarios, including terminal setup-failure isolation.
-Full raw implementation diffs and diagnostics were inspected. Existing diagnostics
-are the harness's `/DNDEBUG` versus `/UNDEBUG` override and a synthetic mirror
-handle conversion warning. These focused results do not prove the full audit
-complete. Root-package linking remains unverified: the focused harness uses local
-glslang without optimizer libraries, and the full package also requires the
-external bHaptics SDK DLL. Headset/gameplay verification is still missing.
+Raw diffs and diagnostics were inspected. Existing warnings are `/DNDEBUG` versus
+`/UNDEBUG` and a synthetic mirror handle conversion. Focused checks do not prove
+the full audit complete. Root-package linking needs glslang optimizer libraries
+and the external bHaptics SDK DLL; headset/gameplay verification is still missing.
 A real 120-300 second combat capture with the desktop mirror disabled must measure
 FPS, CPU/GPU bottlenecks and tail latency; synthetic timings are not a substitute.
 
-Next audit stage: probe fixture determinism, broader shader variants and outer frame interception,
+Next audit stage: broader shader variants and outer frame interception,
 HUD/game hooks, input/integrations and diagnostics. No full-audit completion is claimed.
