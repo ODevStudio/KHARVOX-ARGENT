@@ -166,104 +166,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice d,VkSwapchainKHR
  auto s=deviceOf(key(d));if(argent::sfs::sourceSwapchain(d,sc))return argent::sfs::sourceImages(d,sc,count,images);
  return s->proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR")(d,sc,count,images);
 }
-bool quadSteamPrepareAllowed(const std::shared_ptr<State>& s){
- return s&&(!s->sfs||!argent::sfs::vrEnabled());
-}
-VkResult prepareStereo(const std::shared_ptr<State>& s,VkSwapchainKHR sc,uint32_t image){
- if(!s->sfs||!argent::sfs::vrEnabled())return VK_SUCCESS;
- argent::Source source;{std::lock_guard<std::recursive_mutex> lock(stateMutex);auto it=s->sources.find(sc);if(it==s->sources.end())return VK_SUCCESS;source=it->second;}
- argent::sfs::FramePose pose;XrPosef head;
- const auto options=argent::presentation::options();
- auto sample=argent::presentation::snapshot();sample.flatMenu=argent::hud::flatMenuVisible(true)||(options.cinematics3d&&sample.cutscene&&argent::hud::flatMenuVisible());
- const auto mode=argent::presentation::classify(sample,GetTickCount64(),options);
- bool nextQuad=s->menuQuad;
- const bool manualToggle=(GetAsyncKeyState(VK_F11)&1)!=0;
- if(options.automatic)nextQuad=s->presentation.update(mode,options,GetTickCount64());
- else if(manualToggle)nextQuad=!nextQuad;
- argent::presentation::scriptedMovement=mode==argent::presentation::Mode::Sync||mode==argent::presentation::Mode::Traversal||mode==argent::presentation::Mode::Interaction;
- argent::presentation::gameplayInput=options.automatic?mode==argent::presentation::Mode::Gameplay:!nextQuad;
- argent::presentation::worldPresentation=!nextQuad;
- argent::presentation::hideGameplayHud=argent::presentation::hideHudDuringAnimation(mode,nextQuad);
- const bool changedQuad=nextQuad!=s->menuQuad;
- if(changedQuad){s->menuQuad=nextQuad;if(!nextQuad)s->calibrated=false;argent::camera::stop();}
- if(mode!=s->presentationMode||changedQuad){s->presentationMode=mode;argent::log(std::string("SFS_MODE automatic=")+std::to_string(options.automatic)+" context="+argent::presentation::name(mode)+" quad="+std::to_string(s->menuQuad));}
- argent::sfs::EyeUniforms uniforms{{argent::sfs::identity(),argent::sfs::identity()},{}};
- argent::sfs::Matrix cinematicProjection{};
- const bool wantCinema=argent::presentation::stereoCinematic(mode,options,s->menuQuad)&&s->camera.projection(cinematicProjection,100);
- if(!argent::beginStereoFrame(*s,source,pose,head,s->menuQuad,wantCinema?&cinematicProjection:nullptr,&uniforms)){argent::camera::stop();return VK_SUCCESS;}
- if(s->cinematicStereo!=pose.stereoQuad){s->cinematicStereo=pose.stereoQuad;
-  argent::log(std::string("CINEMATIC_STEREO active=")+std::to_string(pose.stereoQuad)+" context="+argent::presentation::name(mode)+" cameraFresh="+std::to_string(wantCinema)+" headLocked="+std::to_string(pose.quadHeadLocked)+" tracked="+std::to_string(pose.headPositionTracked));}
- argent::camera::beginRender(pose.serial);
- const bool recenter=!s->calibrated||pose.recenterRequested||(GetAsyncKeyState(VK_F12)&1);
- if(recenter){s->calibratedHead=head;s->calibrated=true;argent::log("SFS_RECENTER calibrated current head");}
- argent::camera::updatePose(head,!s->menuQuad,recenter,pose.headPositionTracked);
- if(argent::extendedLogging()&&pose.serial%120==0){auto h=argent::camera::stats();argent::log("ETERNAL_HOOK calls="+std::to_string(h.calls)+" applied="+std::to_string(h.applied)+" rejected="+std::to_string(h.rejected));}
-  argent::sfs::Matrix projection{};projection[0]=1;projection[5]=-float(source.extent.width)/float(source.extent.height);
-  if(!s->menuQuad&&s->camera.projection(projection)){
-  if(!argent::sfs::parallelEyeProjection(projection,pose.views,argent::camera::unitsPerMeter(),uniforms)){argent::cancelStereoFrame();return VK_SUCCESS;}
-  if(argent::extendedLogging()&&(pose.serial==1||pose.serial%120==0))argent::log("ETERNAL_CAMERA_STEREO serial="+std::to_string(pose.serial)+" fx="+std::to_string(projection[0])+" fy="+std::to_string(projection[5])+" unitsPerMeter="+std::to_string(argent::camera::unitsPerMeter())+" positionTracked="+std::to_string(pose.headPositionTracked));
- }
-  if(!s->menuQuad&&!argent::sfs::screenProjection(projection,head,pose.views,uniforms)){argent::log("SFS_UI_PROJECTION_UNAVAILABLE");}
-  static const auto gridMarker=[] {wchar_t p[32768]{};const auto n=GetEnvironmentVariableW(L"ARGENT_LOG",p,32768);return n&&n<32768?std::filesystem::path(p).parent_path()/L"test-light-grid":std::filesystem::path{};}();
-  static bool gridTest=false;
-  if(!argent::cleanRelease&&pose.serial%120==0&&!gridMarker.empty()){
-   const auto attributes=GetFileAttributesW(gridMarker.c_str());const bool enabled=attributes!=INVALID_FILE_ATTRIBUTES&&!(attributes&FILE_ATTRIBUTE_DIRECTORY);
-   if(enabled!=gridTest){gridTest=enabled;argent::log("ETERNAL_GRID_TEST enabled="+std::to_string(gridTest));}
-  }
-  const auto shaderPolicy=argent::presentation::shaderPolicy(s->menuQuad,pose.stereoQuad);
-  uniforms.diagnostics[0]=shaderPolicy.centerGrid?1.f:0.f;
-  uniforms.diagnostics[1]=shaderPolicy.worldWorkarounds?1.f:0.f;
-  if(argent::extendedLogging()&&pose.stereoQuad&&pose.serial%120==0){
-   argent::log("CINEMATIC_SHADER_POLICY worldWorkarounds="+std::to_string(shaderPolicy.worldWorkarounds)+
-    " centerGrid="+std::to_string(shaderPolicy.centerGrid)+" centerGridDepthSafe="+std::to_string(shaderPolicy.centerGrid)+" fx="+std::to_string(cinematicProjection[0])+
-    " gainLeft="+std::to_string(uniforms.clipFromCenter[0][0])+" gainRight="+std::to_string(uniforms.clipFromCenter[1][0])+
-    " shiftWLeft="+std::to_string(uniforms.eyeTranslation[0][3])+" shiftWRight="+std::to_string(uniforms.eyeTranslation[1][3]));
-  }
-  static bool coarseDecals=false;
-  if(!argent::cleanRelease&&pose.serial%120==0&&!gridMarker.empty()){
-   const auto marker=gridMarker.parent_path()/L"test-decal-coarse";
-   const auto attributes=GetFileAttributesW(marker.c_str());
-   const bool enabled=attributes!=INVALID_FILE_ATTRIBUTES&&!(attributes&FILE_ATTRIBUTE_DIRECTORY);
-   if(enabled!=coarseDecals){coarseDecals=enabled;argent::log("ETERNAL_DECAL_COARSE enabled="+std::to_string(enabled));}
-  }
-  uniforms.diagnostics[2]=coarseDecals?1.f:0.f;
-  static int screenProbe=0;
-  if(!argent::cleanRelease&&pose.serial%120==0&&!gridMarker.empty()){
-   int requested=0;std::ifstream file(gridMarker.parent_path()/L"test-screen-mode");
-   if(!(file>>requested)||requested<0||requested>5)requested=0;
-   if(requested!=screenProbe){screenProbe=requested;argent::log("ETERNAL_SCREEN_PROBE mode="+std::to_string(screenProbe));}
-  }
-  uniforms.diagnostics[3]=!s->menuQuad?float(screenProbe):0.f;
-  if(screenProbe==2)uniforms.diagnostics[0]=0.f;
-  s->framePose=pose;argent::sfs::prepare(s->device,pose,uniforms);
- VkResult result;
- {static argent::FrameTiming::Totals t;argent::FrameTiming timing("uniformRetirementAndUpload",t);
-  // Match KHARVOX: no queue submit may race the drain or uniform upload.
-  // Acquire queue before SFS metadata, matching the submission lock order.
-  std::unique_lock<std::recursive_mutex> queueLock(*s->queueMutex,std::defer_lock);
-  {static argent::FrameTiming::Totals queueWait;argent::FrameTiming timing("uniformQueueLockWait",queueWait);queueLock.lock();}
-  result=argent::sfs::beginFrame(s->device,sc,image);}
- if(result!=VK_SUCCESS){
-  if(result==VK_ERROR_DEVICE_LOST){
-   std::vector<VkQueue> queues;{std::lock_guard<std::recursive_mutex> lock(stateMutex);for(const auto& q:s->queues)queues.push_back(q.first);}
-   for(auto queue:queues)argent::sfs::reportGpuCheckpoints(s->device,queue);
-  }
-  argent::camera::stop();argent::cancelStereoFrame();
- }
- return result;
-}
-VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice d,VkSwapchainKHR sc,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* image){
- auto s=deviceOf(key(d));VkResult r;
- if(argent::sfs::sourceSwapchain(d,sc)){static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceAcquire",t);r=argent::sfs::acquireSource(d,sc,timeout,sem,fence,image);}
- else r=s->proc<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(d,sc,timeout,sem,fence,image);
- if(r==VK_SUCCESS||r==VK_SUBOPTIMAL_KHR){if(quadSteamPrepareAllowed(s))argent::prepareSteamFrame(*s,sc);const auto prepared=prepareStereo(s,sc,*image);if(prepared!=VK_SUCCESS)return prepared;}return r;
-}
-VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImage2KHR(VkDevice d,const VkAcquireNextImageInfoKHR* info,uint32_t* image){
- auto s=deviceOf(key(d));if(argent::sfs::sourceSwapchain(d,info->swapchain))return info->deviceMask==1?vkAcquireNextImageKHR(d,info->swapchain,info->timeout,info->semaphore,info->fence,image):VK_ERROR_FEATURE_NOT_PRESENT;
- auto r=s->proc<PFN_vkAcquireNextImage2KHR>("vkAcquireNextImage2KHR")(d,info,image);
- if((r==VK_SUCCESS||r==VK_SUBOPTIMAL_KHR)&&image){if(quadSteamPrepareAllowed(s))argent::prepareSteamFrame(*s,info->swapchain);const auto prepared=prepareStereo(s,info->swapchain,*image);if(prepared!=VK_SUCCESS)return prepared;}
- return r;
-}
+#include "LayerFramePreparation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const VkAllocationCallbacks* a,VkSwapchainKHR* out){
     auto s=deviceOf(key(d));auto modified=*ci;bool copy=false;
     if(s->sfs&&argent::sfs::sourceRingRequested()){
@@ -319,50 +222,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice d,VkSwapchainKHR sc,co
     if(argent::sfs::sourceSwapchain(d,sc)){argent::cancelStereoFrame();argent::retireStereoSources(d);argent::sfs::swapchainDestroyed(d,sc);argent::sfs::destroySourceSwapchain(d,sc);}
     else s->proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(d,sc,a);
 }
-VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue q,const VkPresentInfoKHR* p){
-    argent::PresentAnalysis analysis(argent::presentation::gameplayInput.load());
-    auto s=deviceOf(key(q));if(!s)return VK_ERROR_DEVICE_LOST;
-    bool consumed=false;argent::Source source;State::Queue queue{};bool known=false;
-    if(s->game&&p->swapchainCount==1){
-        {std::lock_guard<std::recursive_mutex> l(stateMutex);auto si=s->sources.find(p->pSwapchains[0]);auto qi=s->queues.find(q);
-        if(si!=s->sources.end()&&qi!=s->queues.end()){source=si->second;queue=qi->second;known=true;}}
-        const bool sfsVrPresent=s->sfs&&argent::sfs::vrEnabled();
-        const bool sourcePresent=argent::sfs::sourceSwapchain(s->device,p->pSwapchains[0]);
-        if(known&&sfsVrPresent){
-          argent::sfs::StereoFrame pair;bool sourceComplete=false;
-          static std::atomic<uint64_t> sfsPairMiss{},sfsPresentMiss{};
-          const bool pairReady=p->pImageIndices[0]<source.images.size()&&argent::sfs::pair(s->device,source.images[p->pImageIndices[0]],source.extent,source.format,pair);
-          if(pairReady){
-            argent::StereoMirror finalMirror;
-            auto mirror=s->mirrors.find(p->pSwapchains[0]);
-            if(sourcePresent&&mirror!=s->mirrors.end()&&mirror->second->needsFrame())
-              finalMirror=[&](VkImage eye,VkExtent2D extent,VkImageLayout layout){
-                try{static argent::FrameTiming::Totals t;argent::FrameTiming timing("desktopMirror",t);
-                  mirror->second->present(*s,eye,q,argent::DesktopMirrorPacing::Clock::now(),extent,layout,true);
-                }catch(const std::exception& e){argent::log(e.what());}
-              };
-            const auto handoff=argent::presentStereoFrame(*s,pair,p->waitSemaphoreCount,p->pWaitSemaphores,finalMirror);
-            consumed=handoff.waitsConsumed;sourceComplete=handoff.sourceComplete;
-            if(!consumed){auto n=++sfsPresentMiss;if(n<=8||(argent::extendedLogging()&&n%120==0))argent::log("SFS_PRESENT_NOT_CONSUMED count="+std::to_string(n)+" image="+std::to_string(p->pImageIndices[0])+" sourcePresent="+std::to_string(sourcePresent));}
-          }else{
-            auto n=++sfsPairMiss;if(n<=8||(argent::extendedLogging()&&n%120==0))argent::log("SFS_PRESENT_NO_PAIR count="+std::to_string(n)+" image="+std::to_string(p->pImageIndices[0])+" images="+std::to_string(source.images.size())+" extent="+std::to_string(source.extent.width)+"x"+std::to_string(source.extent.height));
-            argent::cancelStereoFrame();
-          }
-          if(consumed)argent::readbackStereoIfRequested(*s,source.images[p->pImageIndices[0]],source.extent,source.format);
-          if(sourcePresent){
-            VkResult r;{static argent::FrameTiming::Totals t;argent::FrameTiming timing("sourceRetire",t);r=argent::sfs::presentSource(s->device,q,*p,consumed,sourceComplete);}
-            argent::sfs::copyCompleted(s->device);argent::trace::present();auto n=++presents;
-            if(n==1||(argent::extendedLogging()&&n%120==0))argent::log("SFS_GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed));return r;
-          }
-          argent::sfs::copyCompleted(s->device);
-        }
-        if(!sfsVrPresent&&known&&source.transferable&&s->graphicsQueue)consumed=argent::presentQuad(*s,q,queue.family,queue.index,source,p->pImageIndices[0],*p);
-    }
-    auto ready=*p;if(consumed){ready.waitSemaphoreCount=0;ready.pWaitSemaphores=nullptr;}
-    VkResult r;{std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);r=s->proc<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(q,&ready);}
-    if(s->game){argent::trace::present();auto n=++presents;if(n==1||n%600==0)argent::log("GAME_PRESENT count="+std::to_string(n)+" result="+std::to_string(r)+" XRcopied="+std::to_string(consumed)+" known="+std::to_string(known)+" graphics="+std::to_string(queue.graphics)+" transferable="+std::to_string(source.transferable)+" family="+std::to_string(queue.family)+" index="+std::to_string(queue.index)+" swapchains="+std::to_string(p->swapchainCount));}
-    return r;
-}
+#include "LayerFramePresentation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue q,uint32_t n,const VkSubmitInfo* p,VkFence f){
  auto s=deviceOf(key(q));static argent::FrameTiming::Totals total;argent::FrameTiming timing("gameQueueSubmitTotal",total);
  std::lock_guard<std::recursive_mutex> lock(*s->queueMutex);
