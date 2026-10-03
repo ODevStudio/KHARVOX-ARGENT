@@ -22,10 +22,9 @@ and record them here after each subsystem.
 | `12c9714` | SFS frame publication | Performance | Skip uniform retirement/copy for byte-identical payloads without skipping metadata progression. |
 | `1d9e5f2` | SFS/XR handoff | Performance | Skip redundant source retirement only when XR confirms both wait consumption and source completion. |
 
-Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
-`0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
+Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`, `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, `1b2d47a`, `b21fe2d`, `093e147`, `ef4acb8`, and `222a4db`.
+`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, `1b2d47a`, `b21fe2d`, `093e147`, `ef4acb8`, `222a4db`, and `9029efa`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -44,10 +43,10 @@ payloads still retire GPU use before overwriting the single buffer.
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
 | Hand/depth rendering and HUD | Hand and pause-texture retirement fixed; wider HUD review pending | Verified uploads and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Hand GPU/layout tests and five pause-upload call-site scenarios pass; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Frame recovery and outer diagnostics fixed; native lifecycle pending | Fifty-one production outer-caller scenarios pass, preserving wait consumption, source completion, publication and Vulkan results despite optional failures. Twenty-two stereo-begin, 115 flat-present/preparation/event, ninety-nine stereo-present, eight shutdown, twenty controller-lifecycle and fifty-eight session/swapchain scenarios also pass. Native runtime events, image loss and headset shutdown remain to verify. |
-| Desktop mirror | Presentation and outer ownership fixed; internal setup audit pending | Stop unsafe terminal retries; preserve timeout/suboptimal behavior, one-shot blank and 60 FPS cadence. Clear destroyed handles, retire borrowed XR reads after failed waits, and isolate outer mirror allocation/setup/registration failures from valid stereo sources. Failed native outputs and internal setup allocations still need auditing; headset validation remains pending. |
+| Desktop mirror | Presentation and inner/outer setup ownership fixed; native validation pending | Sixty-eight production-header setup cases pass, covering poisoned native outputs, seventeen host allocation boundaries, returned enumeration counts, clean retry and cached cleanup dispatch. Unsubmitted rollback adds no wait; published teardown retains retirement. Existing terminal-error, timeout/suboptimal, one-shot blank and 60 FPS cadence checks pass. Native WSI/headset validation remains pending. |
 | Diagnostics and capture | Frame reporting and eye-readback retirement fixed; broader capture review pending | Frame timing contains diagnostic exceptions, including stack unwinding. Timeline reporting clears its bounded record window before formatting and rejects failed streams. Eleven focused checks cover allocation failure, full/timed-window recovery and unchanged disabled behavior. Production readback rejects unsafe cleanup after a failed recovery wait; six isolated call-site scenarios and real GPU pixel export pass. Other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC ownership and controller teardown exceptions fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Controller cleanup now reaches both IPC stop requests and input clearing despite optional shutdown failures. Eight original controller regressions fail; twenty fixed lifecycle scenarios and native IPC restart checks pass. State restoration, broader input, per-frame work and complete unload remain to inspect. |
-| Build, test, packaging, and end-to-end verification | All focused checks pass; package and native verification pending | All eighty-one checks pass in 42.92 seconds, including 106 source-creation, fifty-five outer-swapchain and fifty-one outer-frame scenarios. A delayed writer reproduces the launcher fixture's competing timeout; test-only prebuffering isolates the unchanged production byte cap. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
+| Build, test, packaging, and end-to-end verification | All focused checks pass; package and native verification pending | All eighty-two checks pass in 43.36 seconds, including sixty-eight mirror setup, 106 source creation, fifty-five outer swapchain and fifty-one outer frame scenarios. A delayed writer reproduces the launcher fixture's competing timeout; test-only prebuffering isolates the unchanged production byte cap. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
 
 ## New Audit Commits
 
@@ -84,6 +83,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `58c4a5a` | Outer frame acquisition / presentation | Stability | Guard optional logging, debug markers, readback, mirror handlers and tracing; cancel before checkpoint allocation and retain Vulkan results when cancellation reports failure. The initial forty-four-case fixture reproduces twenty-four failures. All fifty-one strengthened production-caller scenarios and the full seventy-nine-check suite pass. |
 | `9cd024c` | SFS source-ring creation and replacement | Stability | Roll back partial native and registry ownership, clear failed outputs and retire valid old chains before replacement. The original fixture reports 112 failures; all 106 final checks pass after reducing implementation allocation boundaries. The full eighty-check suite passes; detailed evidence is linked below. |
 | `96a5716` | Outer native/SFS swapchain creation and teardown | Stability | Keep native ownership local until registration, validate bounded enumeration, contain optional mirror/diagnostic failures and continue retirement after cancellation errors. Thirty initial regressions fail; all fifty-five strengthened cases and the full eighty-one-check suite pass. Detailed evidence is linked below. |
+| `c492e57` | Desktop mirror setup and native ownership | Stability | Own only successful native outputs, roll back unsubmitted setup without GPU waits, cache cleanup dispatch and honor returned enumeration counts. Thirty-four original cases fail; all sixty-eight strengthened cases and the full eighty-two-check suite pass. Detailed evidence is linked below. |
 
 ## Subsystem Evidence
 
@@ -94,6 +94,7 @@ Probe fixture: [scheduling regression and deterministic byte-cap check](PROBE_FI
 Outer frame callers: [diagnostic isolation and retirement evidence](OUTER_FRAME_CALLER_AUDIT.md).
 Source-ring creation: [allocation rollback and replacement retirement](SOURCE_RING_CREATION_AUDIT.md).
 Outer swapchain lifecycle: [registration, mirror isolation and teardown](OUTER_SWAPCHAIN_OWNERSHIP_AUDIT.md).
+Mirror internal setup: [native ownership, rollback and enumeration](MIRROR_SETUP_OWNERSHIP_AUDIT.md).
 
 ### Outer Vulkan Instance Ownership
 
@@ -782,8 +783,8 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 ## Verification Limits
 
 The focused harness compiles both layer units, SFS, hands, FSR, launcher and all four IPC units.
-With outer-swapchain fix `96a5716`, all 81 CTest checks pass in 42.92 seconds.
-Raw checks cover 106 source creation, fifty-five outer swapchain, fifty-one outer frame and eleven diagnostics,
+With mirror-setup fix `c492e57`, all 82 CTest checks pass in 43.36 seconds.
+Raw checks cover sixty-eight mirror setup, 106 source creation, fifty-five outer swapchain, fifty-one outer frame and eleven diagnostics,
 thirty-five outer instance, sixty-eight runtime creation and sixty-two outer device scenarios. Coverage
 includes queue concurrency and GPU-backed shader/rendering checks,
 GPU lifetime gates, readback/pause upload, launcher subprocesses, IPC cancellation
@@ -794,7 +795,6 @@ Frame/session fixtures cover 115 flat/preparation/event and fifty-eight setup/te
 Raw diffs and diagnostics were inspected; existing warnings are `/DNDEBUG` versus
 `/UNDEBUG` and a synthetic mirror handle conversion. Full audit/package verification
 still needs glslang optimizer libraries, the bHaptics SDK DLL and native headset/gameplay validation.
-A 120-300 second combat capture with the desktop mirror disabled must measure
-FPS, CPU/GPU bottlenecks and tail latency; synthetic timings are not a substitute.
+A 120-300 second mirror-disabled combat capture must measure FPS, CPU/GPU bottlenecks and tail latency; synthetic timings are not a substitute.
 
-Next: mirror/core SFS allocation ownership, shaders, HUD/hooks, input and capture. No completion is claimed.
+Next: core SFS allocation ownership, shaders, HUD/hooks, input and capture. No completion is claimed.
