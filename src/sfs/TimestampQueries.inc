@@ -2,10 +2,23 @@
 // consecutive physical queries. Only the first timestamp is returned; Vulkan
 // permits the other view's timestamp to be zero. Never wait for unused odd
 // slots written outside a multiview pass.
-VKAPI_ATTR VkResult VKAPI_CALL createQueryPool(VkDevice d,const VkQueryPoolCreateInfo* info,const VkAllocationCallbacks* a,VkQueryPool* out){RESULT_BEGIN
+VKAPI_ATTR VkResult VKAPI_CALL createQueryPool(VkDevice d,const VkQueryPoolCreateInfo* info,const VkAllocationCallbacks* a,VkQueryPool* out){
+ if(!out)return VK_ERROR_INITIALIZATION_FAILED;
+ *out=VK_NULL_HANDLE;
+ if(!info)return VK_ERROR_INITIALIZATION_FAILED;
+RESULT_BEGIN
+ const auto destroy=FN(vkDestroyQueryPool);
  auto copy=*info;const bool expanded=info->queryType==VK_QUERY_TYPE_TIMESTAMP||info->queryType==VK_QUERY_TYPE_OCCLUSION;
  if(expanded){if(info->queryCount>UINT32_MAX/2)return VK_ERROR_OUT_OF_HOST_MEMORY;copy.queryCount*=2;}
- auto r=FN(vkCreateQueryPool)(d,&copy,a,out);if(r==VK_SUCCESS){s->queryPools[*out]=info->queryType;note("query pool type="+std::to_string(info->queryType)+" logical="+std::to_string(info->queryCount)+" physical="+std::to_string(copy.queryCount));}return r;
+ VkQueryPool pool{};
+ const auto result=FN(vkCreateQueryPool)(d,&copy,a,&pool);
+ if(result!=VK_SUCCESS)return result;
+ if(!pool)return VK_ERROR_INITIALIZATION_FAILED;
+ const auto cleanup=[&](VkQueryPool h){s->queryPools.erase(h);destroy(d,h,a);};
+ std::unique_ptr<std::remove_pointer_t<VkQueryPool>,decltype(cleanup)> owned(pool,cleanup);
+ s->queryPools[pool]=info->queryType;
+ try{note("query pool type="+std::to_string(info->queryType)+" logical="+std::to_string(info->queryCount)+" physical="+std::to_string(copy.queryCount));}catch(...){}
+ *out=owned.release();return VK_SUCCESS;
 RESULT_END}
 VKAPI_ATTR void VKAPI_CALL destroyQueryPool(VkDevice d,VkQueryPool pool,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->queryPools.erase(pool);FN(vkDestroyQueryPool)(d,pool,a);}
 bool queryType(State* s,VkQueryPool pool,VkQueryType type){auto i=s->queryPools.find(pool);return i!=s->queryPools.end()&&i->second==type;}

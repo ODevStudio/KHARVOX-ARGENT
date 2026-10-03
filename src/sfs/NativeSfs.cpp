@@ -302,31 +302,8 @@ VkShaderModule compiledModule(State* s,VkShaderModule original,uint64_t variant,
         note("SHADER_COMPILE startUs="+std::to_string(compileStart/1000)+" endUs="+std::to_string(end/1000)+" thread="+std::to_string(GetCurrentThreadId())+" key="+key+" wallMs="+std::to_string(double(end-compileStart)/1000000.));}
     return result;
 }
-VKAPI_ATTR VkResult VKAPI_CALL createShader(VkDevice d,const VkShaderModuleCreateInfo* i,const VkAllocationCallbacks* a,VkShaderModule* out){RESULT_BEGIN
-    auto r=FN(vkCreateShaderModule)(d,i,a,out);if(r==VK_SUCCESS)s->shaders[*out]={i->pCode,i->pCode+i->codeSize/4};return r;
-RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyShader(VkDevice d,VkShaderModule shader,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->shaders.erase(shader);FN(vkDestroyShaderModule)(d,shader,a);}
-VKAPI_ATTR VkResult VKAPI_CALL captureCreateBuffer(VkDevice d,const VkBufferCreateInfo* i,const VkAllocationCallbacks* a,VkBuffer* out){auto s=state(d);auto info=*i;if(s->waterCapture&&(info.usage&(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)))info.usage|=VK_BUFFER_USAGE_TRANSFER_SRC_BIT;auto r=FN(vkCreateBuffer)(d,&info,a,out);if(r==VK_SUCCESS&&s->waterCapture)s->waterCapture->buffer(*out,info);return r;}
-VKAPI_ATTR void VKAPI_CALL captureDestroyBuffer(VkDevice d,VkBuffer b,const VkAllocationCallbacks* a){auto s=state(d);if(s->waterCapture)s->waterCapture->forgetBuffer(b);FN(vkDestroyBuffer)(d,b,a);}
-VKAPI_ATTR void VKAPI_CALL captureUpdateSets(VkDevice d,uint32_t n,const VkWriteDescriptorSet* writes,uint32_t count,const VkCopyDescriptorSet* copies){auto s=state(d);FN(vkUpdateDescriptorSets)(d,n,writes,count,copies);if(s->waterCapture)s->waterCapture->update(n,writes,count,copies);}
 #include "CoreResources.inc"
-VKAPI_ATTR VkResult VKAPI_CALL createLayout(VkDevice d,const VkDescriptorSetLayoutCreateInfo* i,const VkAllocationCallbacks* a,VkDescriptorSetLayout* out){RESULT_BEGIN
-    std::vector<VkDescriptorSetLayoutBinding> bindings;if(i->bindingCount)bindings.assign(i->pBindings,i->pBindings+i->bindingCount);uint32_t dynamic=0;
-    for(const auto& b:bindings){if(b.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC||b.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)dynamic+=b.descriptorCount;}
-    if(i->pNext)throw std::runtime_error("SFS descriptor layout extension chain not supported by probe");
-    uint32_t reserved=0;
-    while(std::any_of(bindings.begin(),bindings.end(),[&](auto& b){return b.binding==reserved;})){if(reserved==UINT32_MAX)throw std::runtime_error("No free projection binding");++reserved;}
-    for(uint32_t binding:{reserved})bindings.push_back({binding,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT,nullptr});auto info=*i;info.bindingCount=uint32_t(bindings.size());info.pBindings=bindings.data();auto r=FN(vkCreateDescriptorSetLayout)(d,&info,a,out);if(r==VK_SUCCESS){s->dynamicCounts[*out]=dynamic;s->layoutBindings[*out]=reserved;if(s->waterCapture)s->waterCapture->layout(*out,*i);}return r;
-RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyLayout(VkDevice d,VkDescriptorSetLayout layout,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->dynamicCounts.erase(layout);s->layoutBindings.erase(layout);if(s->waterCapture)s->waterCapture->forgetLayout(layout);FN(vkDestroyDescriptorSetLayout)(d,layout,a);}
-VKAPI_ATTR VkResult VKAPI_CALL createPipelineLayout(VkDevice d,const VkPipelineLayoutCreateInfo* i,const VkAllocationCallbacks* a,VkPipelineLayout* out){RESULT_BEGIN
-    auto r=FN(vkCreatePipelineLayout)(d,i,a,out);if(r==VK_SUCCESS){s->pipelineBindings[*out]=i->setLayoutCount?s->layoutBindings.at(i->pSetLayouts[0]):UINT32_MAX;auto& counts=s->pipelineDynamicCounts[*out];for(uint32_t j=0;j<i->setLayoutCount;++j)counts.push_back(s->dynamicCounts.at(i->pSetLayouts[j]));}return r;
-RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyPipelineLayout(VkDevice d,VkPipelineLayout layout,const VkAllocationCallbacks* a){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->pipelineLayoutRetirement.fetch_add(1,std::memory_order_release);s->pipelineDynamicCounts.erase(layout);s->pipelineBindings.erase(layout);FN(vkDestroyPipelineLayout)(d,layout,a);}
-VKAPI_ATTR VkResult VKAPI_CALL createPool(VkDevice d,const VkDescriptorPoolCreateInfo* i,const VkAllocationCallbacks* a,VkDescriptorPool* out){RESULT_BEGIN
-    if(i->maxSets>UINT32_MAX/2)return VK_ERROR_OUT_OF_HOST_MEMORY;
-    std::vector<VkDescriptorPoolSize> sizes;if(i->poolSizeCount)sizes.assign(i->pPoolSizes,i->pPoolSizes+i->poolSizeCount);sizes.push_back({VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,i->maxSets});auto info=*i;info.poolSizeCount=uint32_t(sizes.size());info.pPoolSizes=sizes.data();return FN(vkCreateDescriptorPool)(d,&info,a,out);
-RESULT_END}
+#include "MetadataResources.inc"
 VKAPI_ATTR VkResult VKAPI_CALL allocateSets(VkDevice d,const VkDescriptorSetAllocateInfo* i,VkDescriptorSet* out){RESULT_BEGIN
     auto r=FN(vkAllocateDescriptorSets)(d,i,out);if(r!=VK_SUCCESS)return r;
     if(s->waterCapture)s->waterCapture->allocateSets(*i,out);
