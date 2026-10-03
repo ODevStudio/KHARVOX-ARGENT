@@ -52,7 +52,7 @@ using UpdateHands=void(__fastcall*)(void*);
 UpdateHands originalUpdateHands{};
 using UpdateItemAnimation=void(__fastcall*)(void*,void*);
 UpdateItemAnimation originalItemAnimation{};
-using AttachmentJoint=uintptr_t(__fastcall*)(void*,void*,int,void*,float*,float*);
+using AttachmentJoint=bool(__fastcall*)(void*,void*,int,void*,float*,float*);
 AttachmentJoint originalAttachmentJoint{};
 struct CrucibleVisual {
  uintptr_t hands{},root{},owner{},context{};int dominant{-1};XrVector3f pivot{};
@@ -450,11 +450,11 @@ void __fastcall fire(void* hands,void* weapon,void* info,void* muzzleOrigin,void
   if(!(reported.fetch_or(bit)&bit))try{log("ETERNAL_EQUIPMENT_AIM slot="+std::to_string(slot)+" source=HMD origins=native");}catch(...){}
  }
 }
-uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint,float* origin,float* axis){
+bool __fastcall attachmentJoint(void* model,void* root,int mode,void* joint,float* origin,float* axis){
  const auto result=originalAttachmentJoint(model,root,mode,joint,origin,axis);
  // This one caller attaches a weapon child to the animated hands. Do not
  // substitute skeleton samples or event tracks, or modify the parent root.
- if(uintptr_t(_ReturnAddress())!=uintptr_t(image)+build::rva(0x138a64e)||
+ if(!result||uintptr_t(_ReturnAddress())!=uintptr_t(image)+build::rva(0x138a64e)||
     !animationHands||animationItem!=animationHands+0x29b0)return result;
  const auto owner=ptr(animationHands+0x358),child=ptr(animationItem+0x78);
  if(!owner||owner!=presentation::player.load())return result;
@@ -464,9 +464,11 @@ uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint
  const auto context=camera::weaponContext();
  const auto identity=readWeaponIdentity(reinterpret_cast<void*>(animationHands));
  const bool sameWeapon=matchingWeaponCalibration(sample.weaponProfile.data(),identity.profile);
- if(sample.weaponCorrection&&sameWeapon&&origin&&axis&&child&&
-    uintptr_t(root)==ptr(animationHands+0x370)&&placedHands.load()==animationHands&&
-    now-placementTick<100&&input::fresh(sample,now)&&sample.weaponValid){
+ const bool vrReady=origin&&axis&&child&&context&&sameWeapon&&uintptr_t(root)==ptr(animationHands+0x370)&&
+  placedHands.load()==animationHands&&now-placementTick<100&&input::fresh(sample,now)&&sample.weaponValid&&
+  presentation::gameplayInput.load()&&!presentation::refreshSyncAttack()&&!presentation::refreshAnimationCamera()&&
+  !presentation::scriptedMovement.load()&&!presentation::droneAnimation.load()&&!presentation::monkeyBarAnimation.load();
+ if(sample.weaponCorrection&&vrReady){
   float fromPosition[3]{},toPosition[3]{},fromAxis[9]{},toAxis[9]{};
   if(camera::controllerPlacement(sample.weaponBase,fromPosition,fromAxis)&&
      camera::controllerPlacement(sample.weapon,toPosition,toAxis)){
@@ -487,13 +489,8 @@ uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint
   state=reinterpret_cast<HandsState>(image+build::rva(0x135f130))(reinterpret_cast<void*>(animationHands),false);
   read(animationHands+0x8cd0,&pendingAction,sizeof(pendingAction));
  }
- const bool eligible=origin&&axis&&child&&owner==presentation::player.load()&&context&&(identity.crucible||identity.hammer)&&sameWeapon&&
-  now-weaponTick<100&&uintptr_t(root)==ptr(animationHands+0x370)&&
-  placedHands.load()==animationHands&&now-placementTick<100&&
-  presentation::gameplayInput.load()&&!presentation::refreshSyncAttack()&&
-  !presentation::refreshAnimationCamera()&&!presentation::scriptedMovement.load()&&
-  !presentation::droneAnimation.load()&&!presentation::monkeyBarAnimation.load()&&
-  input::fresh(sample,now)&&input::fresh(controls,now)&&sample.weaponValid&&
+ const bool eligible=vrReady&&owner==presentation::player.load()&&(identity.crucible||identity.hammer)&&
+  now-weaponTick<100&&input::fresh(controls,now)&&
   read(animationHands+0x8cb0,&hit,1)&&!hit&&
   camera::controllerPlacement(sample.weapon,hand,desired,&sample);
  CrucibleRestPose::Events events;

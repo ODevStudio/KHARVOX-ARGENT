@@ -17,10 +17,15 @@ namespace {
 const std::array<float,9> headBasis{0,.8f,.6f,-1,0,0,0,-.6f,.8f};
 bool throwLogs{},throwNative{};
 unsigned logFailures{},allocationFailures{},nativeCalls{},hideCalls{},showCalls{},laserPublications{};
+ULONGLONG currentTick=10000;
+uint64_t currentContext=1;
+uintptr_t attachmentResult=0x123401;
+unsigned attachmentStateCalls{};
+int attachmentState{};
 int failAfter=-1;
 void* caller{};
 void* testCaller(){return caller;}
-ULONGLONG testTick(){return 10000;}
+ULONGLONG testTick(){return currentTick;}
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 }
 void* operator new(size_t size){
@@ -41,7 +46,7 @@ bool swimmingView(float* axis) noexcept {std::memcpy(axis,headBasis.data(),sizeo
 bool wallClimbView(float* axis) noexcept {return swimmingView(axis);}
 bool hudCamera(float* origin,float* axis,uint64_t*) noexcept {const float position[]{1,2,3};std::memcpy(origin,position,sizeof(position));return swimmingView(axis);}
 bool controllerPlacement(XrPosef hand,float* origin,float* axis,const input::Snapshot*) noexcept {std::memcpy(origin,&hand.position,sizeof(hand.position));return swimmingView(axis);}
-uint64_t weaponContext() noexcept {return 1;}
+uint64_t weaponContext() noexcept {return currentContext;}
 float unitsPerMeter() noexcept {return 39.37f;}
 void publishLaser(const float*,const float*,const char*) noexcept {++laserPublications;}
 void publishPhysics(uintptr_t,XrVector3f) noexcept {}
@@ -97,6 +102,11 @@ void __fastcall nativeNestedHands(void* hands){
 }
 short* __fastcall nativeFindJoint(void*,short* joint,const char*){*joint=0;return joint;}
 bool __fastcall nativeJoint(void*,void*,int,unsigned short,float* origin,float* axis){std::memset(origin,0,3*sizeof(float));std::memcpy(axis,headBasis.data(),sizeof(headBasis));return true;}
+uintptr_t __fastcall nativeAttachment(void* model,void*,int mode,void* joint,float* origin,float* axis){
+    ++nativeCalls;check(model==reinterpret_cast<void*>(0x2345)&&mode==1&&joint==reinterpret_cast<void*>(0x1234),"Attachment changed native arguments");nativeFailure();
+    if(attachmentResult&0xff){const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memcpy(axis,headBasis.data(),sizeof(headBasis));}return attachmentResult;
+}
+int __fastcall nativeHandsState(void* hands,bool flag){++attachmentStateCalls;check(uintptr_t(hands)==argent::player::animationHands&&!flag,"Attachment changed native animation-state arguments");return attachmentState;}
 void __fastcall nativeHide(void* root,int surface){++hideCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask&~(uint64_t(1)<<surface));}
 void __fastcall nativeShow(void* root,int surface){++showCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask|(uint64_t(1)<<surface));}
 bool __fastcall nativeTransform(void*,void*,float* origin,float* axis){++nativeCalls;nativeFailure();const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memset(axis,0,9*sizeof(float));return true;}
@@ -219,6 +229,53 @@ void runCase(std::string_view scenario){
         check(allocationFailures==1&&origin[0]==99&&placedTick==0&&!finalVisibility[3].ready,"Authored animation retained the idle pose or allocated a new entry");
         presentation::scriptedMovement=false;origin[0]=99;argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);
         check(origin[0]==99&&!finalVisibility[4].ready,"Gameplay reused an idle pose across authored animation");
+    }else if(kind.rfind("attachment",0)==0){
+        std::array<unsigned char,0x600> childRoot{};put(objects.hands.data(),0x370,uintptr_t(objects.root.data()));put(objects.hands.data(),0x29b0+0x78,uintptr_t(childRoot.data()));
+        animationHands=uintptr_t(objects.hands.data());animationItem=animationHands+0x29b0;caller=image.bytes+build::rva(0x138a64e);
+        originalAttachmentJoint=reinterpret_cast<AttachmentJoint>(&nativeAttachment);image.stub(0x135f130,&nativeHandsState);presentation::gameplayInput=true;
+        input::state.active=true;input::state.tick=currentTick;input::state.weaponValid=true;input::state.weaponBase.position={1,2,3};input::state.weapon.position={2,4,6};
+        input::state.weaponCorrection=kind.rfind("attachment-rest",0)!=0;std::strcpy(input::state.weaponProfile.data(),"crucible");input::weaponApplied(input::state);
+        placedHands=animationHands;placedTick=currentTick;hapticTick=currentTick;std::memcpy(axis,headBasis.data(),sizeof(headBasis));
+        const auto invoke=[&](){return attachmentJoint(reinterpret_cast<void*>(0x2345),objects.root.data(),1,reinterpret_cast<void*>(0x1234),origin,axis);};
+        if(kind.rfind("attachment-rest",0)==0){
+            check(bool(invoke())&&!crucibleVisual.pose.cached,"Attachment captured rest pose before idle settled");currentTick+=400;
+            input::state.tick=currentTick;input::weaponApplied(input::state);placedTick=currentTick;hapticTick=currentTick;
+            check(bool(invoke())&&crucibleVisual.pose.cached,"Attachment did not capture a settled native rest pose");
+            if(kind=="attachment-rest-swing"){
+                input::state.crucibleSwing=currentTick;crucibleEvent<0>(objects.hands.data(),1,2,3,4,5);attachmentState=1;
+                input::state.weapon.position={10,20,30};input::weaponApplied(input::state);check(bool(invoke()),"Rest attachment changed native success");
+                check(origin[0]==12&&origin[1]==21&&origin[2]==30&&crucibleVisual.pose.attacking,"Physical swing lost its cached controller-relative rest attachment");
+            }else if(kind=="attachment-rest-failed"){
+                attachmentResult=0x123400;input::state.manualWeaponTrigger=true;const auto reads=attachmentStateCalls;origin[0]=99;
+                check(!bool(invoke())&&origin[0]==99&&attachmentStateCalls==reads&&crucibleVisual.pose.cached,"Failed native attachment mutated outputs or consumed rest-pose state");
+            }else{
+                if(kind=="attachment-rest-context")++currentContext;else input::state.manualWeaponTrigger=true;
+                check(bool(invoke())&&!crucibleVisual.pose.cached&&origin[0]==4,"Rest attachment survived a changed context or manual native trigger");
+            }
+        }else{
+            if(kind=="attachment-failed"||kind=="attachment-failed-high")attachmentResult=kind=="attachment-failed"?0:0x123400;
+            if(kind=="attachment-native")throwNative=true;
+            if(kind=="attachment-guard-caller")caller=image.bytes+build::rva(0x138a64e)+1;
+            if(kind=="attachment-guard-owner")presentation::player=0;
+            if(kind=="attachment-guard-item")animationItem+=0xd78;
+            if(kind=="attachment-guard-root")put(objects.hands.data(),0x370,uintptr_t(childRoot.data()));
+            if(kind=="attachment-guard-stale")input::weaponRendered.tick=1;
+            if(kind=="attachment-guard-profile")std::strcpy(input::weaponRendered.weaponProfile.data(),"default");
+            if(kind=="attachment-guard-placement")placedTick=1;
+            if(kind=="attachment-guard-gameplay")presentation::gameplayInput=false;
+            if(kind=="attachment-guard-context")currentContext=0;
+            if(kind=="attachment-guard-scripted")presentation::scriptedMovement=true;
+            if(kind=="attachment-guard-monkey")presentation::monkeyBarAnimation=true;
+            if(kind=="attachment-guard-drone")presentation::droneAnimation=true;
+            if(kind=="attachment-guard-authored"){
+                put(objects.owner.data(),0,uintptr_t(1));presentation::playerVtable=1;put(objects.owner.data(),0x167e9,static_cast<unsigned char>(1));
+            }
+            arm(mode);bool result{},escaped{};try{result=bool(invoke());}catch(const std::bad_alloc&){escaped=true;}disarm();
+            check(escaped==throwNative&&nativeCalls==1&&result==(!throwNative&&bool(attachmentResult&0xff)),"Attachment lost the native AL result or exception");
+            const bool corrected=kind=="attachment";check(std::abs(origin[0]-(corrected?5:4))<.0001f&&std::abs(origin[1]-(corrected?7:5))<.0001f&&std::abs(origin[2]-(corrected?9:6))<.0001f,"Attachment modified a rejected native pose or lost calibration");
+            for(size_t k=0;k<headBasis.size();++k)check(std::abs(axis[k]-headBasis[k])<.0001f,"Attachment lost the native/calibrated basis");
+            if(!attachmentResult||kind=="attachment-failed-high"||throwNative)check(attachmentStateCalls==0,"Failed native attachment still dispatched observer calls");
+        }
     }else if(kind=="transform"||kind=="throw"||kind=="fire"){
         arm(mode);
         if(kind=="transform")check(itemTransform(objects.item.data(),objects.hands.data(),origin,axis),"Transform diagnostic changed native success");
@@ -250,10 +307,12 @@ int main(int argc,char** argv){
         if(argc>1){argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",argc>3&&std::string_view(argv[3])=="timing"?L"1":L"0");runCase(argv[1]);return 0;}
         wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768),"Player callback path unavailable");unsigned cases{},failures{};
         for(const bool store:{false,true})for(const bool timing:{false,true}){
-            for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate"})for(const auto mode:{L"normal",L"log",L"oom"}){
+            for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate",L"attachment"})for(const auto mode:{L"normal",L"log",L"oom"}){
                 if(!timing&&std::wstring_view(mode)!=L"normal")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-"+mode,store,timing);
             }
             for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"visibility-interleaved",L"visibility-shared",L"visibility-replaced-entity",L"visibility-replaced-model",L"visibility-invalid",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"attachment-failed",L"attachment-failed-high",L"attachment-native",L"attachment-guard-caller",L"attachment-guard-owner",L"attachment-guard-item",L"attachment-guard-root",L"attachment-guard-stale",L"attachment-guard-profile",L"attachment-guard-placement",L"attachment-rest-swing",L"attachment-rest-failed",L"attachment-rest-context",L"attachment-rest-manual"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"attachment-guard-gameplay",L"attachment-guard-context",L"attachment-guard-scripted",L"attachment-guard-monkey",L"attachment-guard-drone",L"attachment-guard-authored"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){disarm();std::cerr<<error.what()<<'\n';return 1;}
