@@ -6,11 +6,29 @@
 #include "QuadRuntime.h"
 #include <MinHook.h>
 #include <intrin.h>
+#include <array>
+#include <exception>
 #include <cstring>
 namespace argent::presentation {namespace {
 using ConsumeFrame=void(__fastcall*)(void*);
 ConsumeFrame original{};
 std::atomic<bool> storeConsumer{};
+std::mutex presentationInstallationGuard;
+unsigned char* installedImage{};
+struct PresentationHook {void* target;void* detour;void** original;void* previous;};
+struct PresentationHookAttempt {
+ const std::array<PresentationHook,9>& hooks;
+ const uintptr_t previousType;
+ const bool previousStore;
+ size_t created{};
+ bool committed{};
+ ~PresentationHookAttempt(){
+  if(committed)return;
+  for(size_t i=created;i>0;--i)if(MH_RemoveHook(hooks[i-1].target)!=MH_OK){RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+  for(size_t i=0;i<created;++i)*hooks[i].original=hooks[i].previous;
+  playerVtable=previousType;storeConsumer=previousStore;
+ }
+};
 using MenuTransition=void(__fastcall*)(void*,int);
 MenuTransition originalPauseShow{},originalPauseHide{};
 MenuTransition originalUpgradeShow{},originalUpgradeHide{};
@@ -118,7 +136,12 @@ void __fastcall consumeFrame(void* viewBuilder){
 }
 bool pauseRootVisible(){std::lock_guard<std::mutex> lock(pauseMutex);return pauseSession.active()&&pauseSession.rootVisible;}
 bool install(unsigned char* image) noexcept {
- storeConsumer=build::microsoftStore;
+ try{
+ std::lock_guard<std::mutex> lock(presentationInstallationGuard);
+ if(installedImage)return image==installedImage;
+ const auto type=build::rva(0x2db5698);
+ if(!image||!type)return false;
+ for(const auto rva:{0xf88d10,0xf87400,0xf854e0,0xf83ab0,0xf37330,0xf36780,0xf38450,0xf38560,0x17e8740})if(!build::rva(rva))return false;
  // Called only after the camera installer has verified the complete EXE hash.
  constexpr unsigned char bytes[]={0x4c,0x8b,0xdc,0x49,0x89,0x5b,0x20,0x55,0x56,0x57,0x41,0x56,0x41,0x57,0x49,0x8d,0xab,0xe8,0xfe,0xff,0xff,0x48,0x81,0xec,0xf0,0x01,0x00,0x00};
  constexpr unsigned char showBytes[]={0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x30,0x8b,0xfa,0x48,0x8b,0xd9};
@@ -137,25 +160,29 @@ bool install(unsigned char* image) noexcept {
     std::memcmp(image+build::rva(0xf38450),dossierOpenBytes,sizeof(dossierOpenBytes))||
     std::memcmp(image+build::rva(0xf38560),dossierCloseBytes,sizeof(dossierCloseBytes))||
     std::memcmp(image+build::rva(0xf37330),deathShowBytes,sizeof(deathShowBytes))||
-    std::memcmp(image+build::rva(0xf36780),deathHideBytes,sizeof(deathHideBytes))){log("ETERNAL_PRESENTATION refused: native signature mismatch");return false;}
- playerVtable=uintptr_t(image)+build::rva(0x2db5698);
- // idHUDMenu_Screen_Pause vtable slots 51/52, verified for this EXE.
- if(MH_CreateHook(image+build::rva(0xf88d10),reinterpret_cast<void*>(&pauseShow),reinterpret_cast<void**>(&originalPauseShow))!=MH_OK)return false;
- if(MH_CreateHook(image+build::rva(0xf87400),reinterpret_cast<void*>(&pauseHide),reinterpret_cast<void**>(&originalPauseHide))!=MH_OK){MH_RemoveHook(image+build::rva(0xf88d10));return false;}
- const bool created=MH_CreateHook(image+build::rva(0xf854e0),reinterpret_cast<void*>(&upgradeShow),reinterpret_cast<void**>(&originalUpgradeShow))==MH_OK&&
-  MH_CreateHook(image+build::rva(0xf37330),reinterpret_cast<void*>(&deathShow),reinterpret_cast<void**>(&originalDeathShow))==MH_OK&&
-  MH_CreateHook(image+build::rva(0xf36780),reinterpret_cast<void*>(&deathHide),reinterpret_cast<void**>(&originalDeathHide))==MH_OK&&
-  MH_CreateHook(image+build::rva(0xf38450),reinterpret_cast<void*>(&dossierOpen),reinterpret_cast<void**>(&originalDossierOpen))==MH_OK&&
-  MH_CreateHook(image+build::rva(0xf38560),reinterpret_cast<void*>(&dossierClose),reinterpret_cast<void**>(&originalDossierClose))==MH_OK&&
-  MH_CreateHook(image+build::rva(0xf83ab0),reinterpret_cast<void*>(&upgradeHide),reinterpret_cast<void**>(&originalUpgradeHide))==MH_OK&&
-  MH_CreateHook(image+build::rva(0x17e8740),reinterpret_cast<void*>(&consumeFrame),reinterpret_cast<void**>(&original))==MH_OK;
- bool ok=created;
- if(ok)for(auto rva:{0xf88d10,0xf87400,0xf854e0,0xf83ab0,0xf37330,0xf36780,0xf38450,0xf38560,0x17e8740})if(MH_EnableHook(image+build::rva(rva))!=MH_OK){ok=false;break;}
- if(!ok){for(auto rva:{0xf88d10,0xf87400,0xf854e0,0xf83ab0,0xf37330,0xf36780,0xf38450,0xf38560,0x17e8740}){MH_DisableHook(image+build::rva(rva));MH_RemoveHook(image+build::rva(rva));}}
- log("ETERNAL_DOSSIER source=native-lifecycle installed="+std::to_string(ok));
- log("ETERNAL_DEATH source=native-lifecycle installed="+std::to_string(ok));
- log("ETERNAL_UPGRADE source=modbot-native-lifecycle installed="+std::to_string(ok));
- log("ETERNAL_PAUSE source=native-menu-lifecycle installed="+std::to_string(ok));
- log("ETERNAL_PRESENTATION source=render-view-consumer installed="+std::to_string(ok));return ok;
+    std::memcmp(image+build::rva(0xf36780),deathHideBytes,sizeof(deathHideBytes))){try{log("ETERNAL_PRESENTATION refused: native signature mismatch");}catch(...){}return false;}
+ const std::array<PresentationHook,9> hooks{{
+  {image+build::rva(0xf88d10),reinterpret_cast<void*>(&pauseShow),reinterpret_cast<void**>(&originalPauseShow),reinterpret_cast<void*>(originalPauseShow)},
+  {image+build::rva(0xf87400),reinterpret_cast<void*>(&pauseHide),reinterpret_cast<void**>(&originalPauseHide),reinterpret_cast<void*>(originalPauseHide)},
+  {image+build::rva(0xf854e0),reinterpret_cast<void*>(&upgradeShow),reinterpret_cast<void**>(&originalUpgradeShow),reinterpret_cast<void*>(originalUpgradeShow)},
+  {image+build::rva(0xf83ab0),reinterpret_cast<void*>(&upgradeHide),reinterpret_cast<void**>(&originalUpgradeHide),reinterpret_cast<void*>(originalUpgradeHide)},
+  {image+build::rva(0xf37330),reinterpret_cast<void*>(&deathShow),reinterpret_cast<void**>(&originalDeathShow),reinterpret_cast<void*>(originalDeathShow)},
+  {image+build::rva(0xf36780),reinterpret_cast<void*>(&deathHide),reinterpret_cast<void**>(&originalDeathHide),reinterpret_cast<void*>(originalDeathHide)},
+  {image+build::rva(0xf38450),reinterpret_cast<void*>(&dossierOpen),reinterpret_cast<void**>(&originalDossierOpen),reinterpret_cast<void*>(originalDossierOpen)},
+  {image+build::rva(0xf38560),reinterpret_cast<void*>(&dossierClose),reinterpret_cast<void**>(&originalDossierClose),reinterpret_cast<void*>(originalDossierClose)},
+  {image+build::rva(0x17e8740),reinterpret_cast<void*>(&consumeFrame),reinterpret_cast<void**>(&original),reinterpret_cast<void*>(original)}
+ }};
+ PresentationHookAttempt attempt{hooks,playerVtable.load(),storeConsumer.load()};
+ for(const auto& hook:hooks){if(MH_CreateHook(hook.target,hook.detour,hook.original)!=MH_OK)return false;++attempt.created;}
+ playerVtable=uintptr_t(image)+type;storeConsumer=build::microsoftStore;
+ for(const auto& hook:hooks)if(MH_EnableHook(hook.target)!=MH_OK)return false;
+ attempt.committed=true;installedImage=image;
+ try{log("ETERNAL_DOSSIER source=native-lifecycle installed=1");}catch(...){}
+ try{log("ETERNAL_DEATH source=native-lifecycle installed=1");}catch(...){}
+ try{log("ETERNAL_UPGRADE source=modbot-native-lifecycle installed=1");}catch(...){}
+ try{log("ETERNAL_PAUSE source=native-menu-lifecycle installed=1");}catch(...){}
+ try{log("ETERNAL_PRESENTATION source=render-view-consumer installed=1");}catch(...){}
+ return true;
+ }catch(...){return false;}
 }
 }
