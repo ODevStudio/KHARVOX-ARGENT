@@ -92,7 +92,7 @@ std::atomic<ULONGLONG> zoomTick{};
 std::atomic<uint64_t> transforms{},placed{},aimUpdates{},physicsReads{},missingPivot{},hidden{};
 std::atomic<uintptr_t> placedHands{};std::atomic<ULONGLONG> placedTick{};
 bool read(uintptr_t p,void* out,size_t n){SIZE_T done{};return p&&ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(p),out,n,&done)&&done==n;}
-uintptr_t ptr(uintptr_t p){uintptr_t value{};read(p,&value,sizeof(value));return value;}
+uintptr_t ptr(uintptr_t p){uintptr_t value{};return read(p,&value,sizeof(value))?value:0;}
 using WaterMove=void(__fastcall*)(void*,void*);
 WaterMove originalWaterMove{};
 void __fastcall waterMove(void* object,void* context){
@@ -144,7 +144,7 @@ WeaponIdentity readWeaponIdentity(void* hands){
  uint32_t generation{},cached{};uintptr_t weapon{},decl{},table{},name{};
  WeaponIdentity identity;auto& text=identity.name;auto& kind=identity.kind;
  if(read(handle+0x30,&generation,4)&&read(handle+0x34,&cached,4)&&generation==cached&&generation!=0x1fffffe&&
-    read(handle+0x38,&weapon,8)&&weapon&&read(weapon+0x38,&decl,8)&&decl&&
+    (weapon=ptr(handle+0x38))&&read(weapon+0x38,&decl,8)&&decl&&
     read(decl,&table,8)&&table==uintptr_t(image)+build::rva(0x2b1c348)&&read(decl+8,&name,8)&&name){
   char* end{};
   if(read(name,text,sizeof(text)-1))end=static_cast<char*>(std::memchr(text,0,sizeof(text)-1));

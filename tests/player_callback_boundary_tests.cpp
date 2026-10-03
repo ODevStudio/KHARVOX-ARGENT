@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -20,7 +21,12 @@ const std::array<float,9> headBasis{0,.8f,.6f,-1,0,0,0,-.6f,.8f};
 bool throwLogs{},throwNative{};
 unsigned logFailures{},allocationFailures{},nativeCalls{},hideCalls{},showCalls{},laserPublications{};
 unsigned memoryReads{};
-BOOL testReadMemory(HANDLE process,LPCVOID address,LPVOID output,SIZE_T size,SIZE_T* done){++memoryReads;return ReadProcessMemory(process,address,output,size,done);}
+uintptr_t failedRead{};bool truncatedRead{};
+BOOL testReadMemory(HANDLE process,LPCVOID address,LPVOID output,SIZE_T size,SIZE_T* done){
+    ++memoryReads;const auto result=ReadProcessMemory(process,address,output,size,done);
+    if(result&&uintptr_t(address)==failedRead&&size==sizeof(uintptr_t)){*done=size-2;SetLastError(ERROR_PARTIAL_COPY);return truncatedRead;}
+    return result;
+}
 ULONGLONG currentTick=10000;
 uint64_t currentContext=1;
 uintptr_t attachmentResult=0x123401;
@@ -29,6 +35,7 @@ int attachmentState{};
 void* resolvedWeapon{};void* resolvedDecl{};void* expectedHandle{};
 unsigned zoomDeclCalls{},zoomDeclFailure{},rootPublications{};
 float receivedBlend{-1};bool throwPublication{},failZoomBlend{};
+void* expectedModel{};void* expectedLocator{};bool muzzleResult=true,muzzleFault{},invalidMuzzleBasis{},invalidMuzzleOrigin{};
 int failAfter=-1;
 void* caller{};
 void* testCaller(){return caller;}
@@ -121,6 +128,12 @@ int __fastcall nativeZoomMode(void*){++nativeCalls;nativeFailure();return 1;}
 void* __fastcall nativeResolve(void* handle){check(handle==expectedHandle,"Zoom resolved a different native handle");return resolvedWeapon;}
 void* __fastcall nativeZoomDecl(void* weapon,int slot){++zoomDeclCalls;check(weapon==resolvedWeapon&&(slot==0||slot==1),"Zoom changed native declaration arguments");if(zoomDeclCalls==zoomDeclFailure)RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);return resolvedDecl;}
 void __fastcall nativeRootPublish(void* root){++rootPublications;check(root==observedRoot&&nativeCalls==1,"Precision Bolt published before native item animation");if(throwPublication)throw std::bad_alloc{};put(root,0xb0,static_cast<unsigned char>(get<unsigned char>(root,0xb0)&~1));}
+bool __fastcall nativeMuzzle(void* model,void* root,int mode,const void* locator,float* origin,float* axis){
+    ++nativeCalls;check(model==expectedModel&&root==observedRoot&&mode==1&&locator==expectedLocator,"Laser changed native locator-transform arguments");
+    if(muzzleFault)RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);if(!muzzleResult)return false;
+    const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memcpy(axis,headBasis.data(),sizeof(headBasis));
+    if(invalidMuzzleBasis)axis[0]=std::numeric_limits<float>::quiet_NaN();if(invalidMuzzleOrigin)origin[0]=std::numeric_limits<float>::quiet_NaN();return true;
+}
 void __fastcall nativeHide(void* root,int surface){++hideCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask&~(uint64_t(1)<<surface));}
 void __fastcall nativeShow(void* root,int surface){++showCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask|(uint64_t(1)<<surface));}
 bool __fastcall nativeTransform(void*,void*,float* origin,float* axis){++nativeCalls;nativeFailure();const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memset(axis,0,9*sizeof(float));return true;}
@@ -137,6 +150,11 @@ struct Image {
         const unsigned char jump[]{0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xe0};std::memcpy(target,jump,sizeof(jump));
         const auto address=reinterpret_cast<uintptr_t>(function);std::memcpy(target+2,&address,sizeof(address));DWORD old{};
         check(VirtualProtect(page,4096,PAGE_EXECUTE_READ,&old)&&FlushInstructionCache(GetCurrentProcess(),page,4096),"Callback stub protection failed");
+    }
+    void data(uintptr_t rva,const void* source,size_t size){
+        auto target=bytes+rva;auto page=reinterpret_cast<void*>(uintptr_t(target)&~uintptr_t(4095));
+        check(size<=4096-(uintptr_t(target)&4095)&&VirtualAlloc(page,4096,MEM_COMMIT,PAGE_READWRITE)!=nullptr,"Native data page unavailable");
+        std::memcpy(target,source,size);DWORD old{};check(VirtualProtect(page,4096,PAGE_READONLY,&old),"Native data protection failed");
     }
     ~Image(){VirtualFree(bytes,0,MEM_RELEASE);}
 };
@@ -172,7 +190,37 @@ void runCase(std::string_view scenario){
     using namespace argent;using namespace argent::player;
     const auto split=scenario.rfind('-');const auto kind=scenario.substr(0,split),mode=scenario.substr(split+1);
     Image image;Objects objects(image);float origin[3]{4,5,6},axis[9]{};
-    if(kind.rfind("identity",0)==0){
+    if(kind.rfind("hammer",0)==0){
+        constexpr uint32_t typeRva=0x4214130,locatorRva=0x357cc20,tableRva=0x2e10910;
+        std::array<unsigned char,64> descriptor{};std::strcpy(reinterpret_cast<char*>(descriptor.data()+16),".?AVidHammerWeapon@@");
+        std::array<uint32_t,6> locator{1,0,0,typeRva,0x357cc48,locatorRva};const std::array<uintptr_t,2> table{uintptr_t(image.bytes)+locatorRva,uintptr_t(image.bytes)+0x168b4f0};
+        if(kind=="hammer-signature")locator[0]=0;if(kind=="hammer-self")++locator[5];if(kind=="hammer-type")locator[3]=0x10000001;
+        if(kind=="hammer-name")descriptor[16+sizeof(".?AVidHammerWeapon@@")-1]='_';
+        image.data(typeRva,descriptor.data(),descriptor.size());image.data(locatorRva,locator.data(),sizeof(locator));image.data(tableRva-8,table.data(),sizeof(table));
+        put(objects.weapon.data(),0,kind=="hammer-table"?uintptr_t(4):uintptr_t(image.bytes)+tableRva);put(objects.decl.data(),8,uintptr_t("weapon/player/hammer"));
+        if(kind=="hammer-decl")put(objects.decl.data(),0,uintptr_t(1));if(kind=="hammer-generation")put(objects.hands.data(),0x29b0+0x34,uint32_t(2));
+        if(kind=="hammer-null")put(objects.hands.data(),0x29b0+0x38,uintptr_t(0));
+        if(kind=="hammer-pointer-fail"||kind=="hammer-pointer-short"){failedRead=uintptr_t(objects.hands.data())+0x29b0+0x38;truncatedRead=kind=="hammer-pointer-short";}
+        const auto identity=readWeaponIdentity(objects.hands.data());const bool valid=kind=="hammer-normal"||kind=="hammer-decl";
+        check(identity.hammer==valid&&!identity.crucible&&std::strcmp(identity.profile,valid?"sentinel_hammer":"default")==0,"Hammer selected an unverified type or primary handle");
+    }else if(kind.rfind("laser",0)==0){
+        std::array<unsigned char,0x20> model{};std::array<unsigned char,0x400> definition{};std::array<unsigned char,0x2a0> groups{};std::array<unsigned char,0x50> entries{};
+        std::array<char,16> groupName{};std::strcpy(groupName.data(),"_info");std::array<char,16> name{};std::strcpy(name.data(),"muzzle");
+        put(objects.hands.data(),0x29b0+0x78,uintptr_t(objects.root.data()));put(objects.root.data(),0x4e0,uintptr_t(model.data()));
+        put(model.data(),8,uintptr_t(definition.data()));put(definition.data(),0x278,uintptr_t(groups.data()));put(definition.data(),0x280,int(2));
+        put(groups.data(),8,uintptr_t("_other"));put(groups.data(),0x150+8,uintptr_t(groupName.data()));put(groups.data(),0x150+0x130,uintptr_t(entries.data()));put(groups.data(),0x150+0x138,int(2));
+        put(entries.data(),0,uintptr_t("muzzle_light"));put(entries.data(),0x28,uintptr_t(name.data()));expectedModel=model.data();expectedLocator=entries.data()+0x28+8;image.stub(0x1981bc0,&nativeMuzzle);
+        if(kind=="laser-item-hidden")put(objects.hands.data(),0x29b0+0x54,static_cast<unsigned char>(1));if(kind=="laser-root-hidden")put(objects.root.data(),0xb0,static_cast<unsigned char>(1));
+        if(kind=="laser-no-mask")put(objects.root.data(),0x518,uint64_t(0));if(kind=="laser-missing-model")put(objects.root.data(),0x4e0,uintptr_t(0));if(kind=="laser-missing-definition")put(model.data(),8,uintptr_t(0));
+        if(kind=="laser-zero-groups"||kind=="laser-high-groups")put(definition.data(),0x280,kind=="laser-zero-groups"?0:257);
+        if(kind=="laser-zero-entries"||kind=="laser-high-entries")put(groups.data(),0x150+0x138,kind=="laser-zero-entries"?0:1025);
+        if(kind=="laser-group-prefix")std::strcpy(groupName.data(),"_info_extra");if(kind=="laser-name-prefix")std::strcpy(name.data(),"muzzle_burst");
+        if(kind=="laser-pointer-fail"||kind=="laser-pointer-short"){failedRead=uintptr_t(objects.root.data())+0x4e0;truncatedRead=kind=="laser-pointer-short";}
+        muzzleResult=kind!="laser-native-false";muzzleFault=kind=="laser-native-fault";invalidMuzzleBasis=kind=="laser-invalid-basis";invalidMuzzleOrigin=kind=="laser-invalid-origin";
+        const bool native=kind=="laser-normal"||kind.rfind("laser-native",0)==0||kind.rfind("laser-invalid",0)==0;
+        check(laserMuzzle(uintptr_t(objects.hands.data()),origin,axis)==(kind=="laser-normal")&&nativeCalls==unsigned(native),"Laser accepted an unverified locator or changed native dispatch");
+        if(kind=="laser-normal")check(origin[0]==4&&origin[1]==5&&origin[2]==6&&std::memcmp(axis,headBasis.data(),sizeof(headBasis))==0,"Laser lost the native locator transform");
+    }else if(kind.rfind("identity",0)==0){
         std::array<char,256> name{};std::strcpy(name.data(),"weapon/player/crucible");put(objects.decl.data(),8,uintptr_t(name.data()));
         struct Pages {unsigned char* bytes{};~Pages(){if(bytes)VirtualFree(bytes,0,MEM_RELEASE);}} pages;
         if(kind=="identity-page-tail"||kind=="identity-page-unterminated"||kind=="identity-unreadable"){
@@ -396,6 +444,8 @@ int main(int argc,char** argv){
             for(const auto kind:{L"attachment-failed",L"attachment-failed-high",L"attachment-native",L"attachment-guard-caller",L"attachment-guard-owner",L"attachment-guard-item",L"attachment-guard-root",L"attachment-guard-stale",L"attachment-guard-profile",L"attachment-guard-placement",L"attachment-rest-swing",L"attachment-rest-failed",L"attachment-rest-context",L"attachment-rest-manual"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"attachment-guard-gameplay",L"attachment-guard-context",L"attachment-guard-scripted",L"attachment-guard-monkey",L"attachment-guard-drone",L"attachment-guard-authored"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"identity-bulk",L"identity-page-tail",L"identity-page-unterminated",L"identity-unreadable",L"identity-long",L"identity-generation",L"identity-decl",L"identity-heap"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"hammer-normal",L"hammer-decl",L"hammer-generation",L"hammer-null",L"hammer-signature",L"hammer-self",L"hammer-type",L"hammer-name",L"hammer-table",L"hammer-pointer-fail",L"hammer-pointer-short"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"laser-normal",L"laser-item-hidden",L"laser-root-hidden",L"laser-no-mask",L"laser-missing-model",L"laser-missing-definition",L"laser-zero-groups",L"laser-high-groups",L"laser-zero-entries",L"laser-high-entries",L"laser-group-prefix",L"laser-name-prefix",L"laser-native-false",L"laser-native-fault",L"laser-invalid-basis",L"laser-invalid-origin",L"laser-pointer-fail",L"laser-pointer-short"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"zoom-prepare-normal",L"zoom-prepare-fault1",L"zoom-prepare-fault2",L"zoom-prepare-blend-fault",L"zoom-prepare-meathook",L"zoom-prepare-inactive",L"zoom-gate-normal",L"zoom-gate-scripted",L"zoom-gate-monkey",L"zoom-gate-context",L"zoom-gate-stale",L"zoom-gate-zero",L"precision-normal",L"precision-generation",L"precision-invalid-generation",L"precision-weapon-swap",L"precision-mode",L"precision-decl",L"precision-name",L"precision-publish-native"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
