@@ -30,6 +30,28 @@ static unsigned parameterMaps{},parameterUnmaps{},parameterFrees{},parameterReti
 static VkDeviceMemory parameterMemory{};
 static void* parameterData{};
 static bool parameterFreedWhileMapped{};
+static VkImage eyeViewImage{};
+static int eyeViewFailureLayer=-1;
+static VkResult eyeViewFailureResult=VK_SUCCESS;
+static std::array<unsigned,2> eyeViewCreates{},eyeViewDestroys{};
+static std::array<VkImageView,2> checkedEyeViews{};
+static const auto poisonedEyeView=reinterpret_cast<VkImageView>(uintptr_t(0xdead));
+static VKAPI_ATTR VkResult VKAPI_CALL testCreateView(VkDevice device,const VkImageViewCreateInfo* info,const VkAllocationCallbacks* allocator,VkImageView* output){
+ const bool tracked=eyeViewImage&&info->image==eyeViewImage&&info->viewType==VK_IMAGE_VIEW_TYPE_2D;
+ if(tracked){
+  const auto eye=info->subresourceRange.baseArrayLayer;if(eye>1)throw std::runtime_error("Cached view selected an invalid eye");
+  ++eyeViewCreates[eye];
+  if(int(eye)==eyeViewFailureLayer){*output=eyeViewFailureResult==VK_SUCCESS?VK_NULL_HANDLE:poisonedEyeView;return eyeViewFailureResult;}
+ }
+ const auto result=reinterpret_cast<PFN_vkCreateImageView>(driverResolver(device,"vkCreateImageView"))(device,info,allocator,output);
+ if(tracked&&result==VK_SUCCESS)checkedEyeViews[info->subresourceRange.baseArrayLayer]=*output;
+ return result;
+}
+static VKAPI_ATTR void VKAPI_CALL testDestroyView(VkDevice device,VkImageView view,const VkAllocationCallbacks* allocator){
+ if(view==poisonedEyeView)throw std::runtime_error("Cached view destroyed a poisoned native output");
+ if(eyeViewImage)for(unsigned eye=0;eye<2;++eye)if(view==checkedEyeViews[eye])++eyeViewDestroys[eye];
+ reinterpret_cast<PFN_vkDestroyImageView>(driverResolver(device,"vkDestroyImageView"))(device,view,allocator);
+}
 // Exercise the real SFS hooks without requiring a ray-tracing-capable test GPU.
 // Only the synthetic ray commands are consumed here; graphics/compute still
 // execute on the driver and are checked by the image/compute readbacks below.
@@ -89,6 +111,8 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL testResolver(VkDevice device,con
  if(!std::strcmp(name,"vkUnmapMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testUnmap);
  if(!std::strcmp(name,"vkFreeMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testFreeMemory);
  if(!std::strcmp(name,"vkCreateRenderPass"))return reinterpret_cast<PFN_vkVoidFunction>(testCreatePass);
+ if(!std::strcmp(name,"vkCreateImageView"))return reinterpret_cast<PFN_vkVoidFunction>(testCreateView);
+ if(!std::strcmp(name,"vkDestroyImageView"))return reinterpret_cast<PFN_vkVoidFunction>(testDestroyView);
  return driverResolver(device,name);
 }
 #endif
@@ -237,6 +261,7 @@ int main(int argc,char** argv){try{
  VkCommandPool pool{};ok(vkCreateCommandPool(device,&poolInfo,nullptr,&pool));VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};allocate.commandPool=pool;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
  VkCommandBuffer command{};ok(vkAllocateCommandBuffers(device,&allocate,&command));
 #ifdef KHARVOX_SFS_RING_RUNTIME
+ #include "SfsEyeViewChecks.inc"
  // Real Vulkan eye views supplied to an external (unmodified) image consumer.
  // Repeated resolution must reuse handles, and never select the other layer.
  argent::dlss::Resource dlssInput{};dlssInput.view=views[0];dlssInput.image=images[0];

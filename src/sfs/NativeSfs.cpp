@@ -538,7 +538,11 @@ bool dlssEyeResources(VkCommandBuffer command,const std::array<const dlss::Resou
             const uint32_t index=stereo?eye:0;
             auto viewInfo=info;viewInfo.viewType=VK_IMAGE_VIEW_TYPE_2D;
             viewInfo.subresourceRange.baseArrayLayer+=index;viewInfo.subresourceRange.layerCount=1;
-            if(!cached[index]&&FN(vkCreateImageView)(s->device,&viewInfo,nullptr,&cached[index])!=VK_SUCCESS)return false;
+            if(!cached[index]){
+                VkImageView created{};
+                if(FN(vkCreateImageView)(s->device,&viewInfo,nullptr,&created)!=VK_SUCCESS||!created)return false;
+                cached[index]=created;
+            }
             auto& out=output[eye].resources[i];out=resource;
             out.view=cached[index];out.range=viewInfo.subresourceRange;
         }
@@ -553,7 +557,9 @@ bool eyeAttachmentView(VkDevice d,VkImageView original,uint32_t eye,VkImageView&
     if(info.viewType!=VK_IMAGE_VIEW_TYPE_2D_ARRAY||info.subresourceRange.layerCount<2)return false;
     auto& cached=s->eyeViews[original][eye];
     if(!cached){info.viewType=VK_IMAGE_VIEW_TYPE_2D;info.subresourceRange.baseArrayLayer+=eye;info.subresourceRange.layerCount=1;
-        if(FN(vkCreateImageView)(d,&info,nullptr,&cached)!=VK_SUCCESS)return false;}
+        VkImageView created{};
+        if(FN(vkCreateImageView)(d,&info,nullptr,&created)!=VK_SUCCESS||!created)return false;
+        cached=created;}
     result=cached;return true;
 }
 void prepare(VkDevice d,const FramePose& pose,const EyeUniforms& uniforms){
