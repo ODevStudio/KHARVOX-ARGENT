@@ -7,6 +7,7 @@
 | `c3ce848` | Performance/Stability | Classify weapon names without heap allocation. |
 | `6e096e4` | Stability | Preserve native callback results and restore temporary player state. |
 | `cda8d14` | Stability | Preserve placement bookkeeping and nested visibility through cache failures. |
+| `506e343` | Stability | Retain per-root masks across interleaved hands and invalidate observed native identity changes. |
 
 ## Callback Findings
 
@@ -59,8 +60,9 @@ The callback restoration and diagnostic guards add no GPU waits.
 
 ## Remaining Scope
 
-Root-mask ownership across interleaved hands, root destruction and pointer reuse
-still needs native lifecycle evidence. The current fixture does not
+Interleaved and shared-root mask ownership now has controlled fixture coverage.
+Root destruction and identical-identity address reuse still need native lifecycle
+evidence. The current fixture does not
 comprehensively execute attachment/rest-pose or precision-bolt branches.
 Native game/headset callbacks, broader context changes and DLL unload remain
 unverified. Controller state/rumble setup is recorded in
@@ -98,3 +100,31 @@ the existing player-mechanics policy check.
 
 These changes add no GPU waits. Allocation avoidance has no quantified gameplay
 FPS benefit; native player/root lifecycle verification remains pending.
+
+## Root Visibility Ownership
+
+The cache previously cleared every saved mask whenever the hands pointer changed.
+Interleaved updates lost distinct roots' restore state; two hands using one root
+could replace its original mask with the already-hidden zero mask.
+The first five added scenarios failed in all four profile/timing combinations:
+twenty failures in 154 production-source cases.
+
+Masks now belong to the root rather than the last hands callback. Each entry
+records its native vtable, render-entity pointer and render-model pointer using
+guarded reads. A changed identity discards the old mask before any restoration;
+an unreadable or rejected identity also drops that address's cached state.
+Repeated hiding keeps the original mask, and successful restoration releases
+the entry. Existing allocation-failure recovery remains covered.
+
+All 154 cases pass, including distinct/shared interleaved roots, changed render
+entities/models and an observed invalid identity followed by address reuse.
+The production player source compiles; six focused player/caller checks pass in
+7.81 seconds. The complete 123-check suite passes in 104.12 seconds.
+Raw diffs and diagnostics were inspected. No FPS gain is claimed.
+
+This is not native object-generation tracking. Reuse with the same address,
+vtable and model pointers cannot be distinguished by these reads. Entries for
+destroyed roots that never restore can remain until that address is observed
+again; cleanup requires verified native lifecycle evidence rather than silently
+discarding live restore ownership. Native destruction, complete cache retirement
+and game/headset transitions remain unverified.
