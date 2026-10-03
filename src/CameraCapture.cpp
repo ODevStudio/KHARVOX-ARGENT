@@ -230,7 +230,7 @@ void CameraCapture::readback(Device& d,VkQueue queue,uint32_t family,bool probeO
         void* mapped{};check(GPU(vkMapMemory)(d.device,memory,0,bi.size,0,&mapped));resources.mapped=mapped;if(!mapped)throw std::runtime_error("Camera readback mapping unavailable");
         std::vector<unsigned char> values(size_t(bi.size));std::memcpy(values.data(),mapped,size_t(bi.size));resources.unmap(d.device,memory);resources.mapped=nullptr;
         cursor=0;for(const auto& r:requests){
-         if(!r.output.empty()){std::ofstream out(r.output,std::ios::binary);out.write(reinterpret_cast<const char*>(values.data()+size_t(cursor)),std::streamsize(r.size));if(!out)throw std::runtime_error("Cannot write decal GPU buffer");log("DECAL_GPU_BUFFER "+r.output.string()+" bytes="+std::to_string(r.size));}
+         if(!r.output.empty()){std::ofstream out(r.output,std::ios::binary);out.write(reinterpret_cast<const char*>(values.data()+size_t(cursor)),std::streamsize(r.size));if(!out)throw std::runtime_error("Cannot write decal GPU buffer");try{log("DECAL_GPU_BUFFER "+r.output.string()+" bytes="+std::to_string(r.size));}catch(...){}}
          else {std::ofstream out(captureRoot()/"camera-gpu.tsv",std::ios::app);out<<std::setprecision(9)<<trace::currentFrame()<<'\t'<<trace::id(r.pipeline)<<'\t'<<r.binding<<'\t'<<r.index;float floats[16];std::memcpy(floats,values.data()+size_t(cursor),64);for(auto f:floats)out<<'\t'<<f;out<<'\n';}
          cursor+=r.size;
         }

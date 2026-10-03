@@ -117,7 +117,7 @@ int child(bool probe){
         std::ifstream first(output/"first.bin",std::ios::binary),second(output/"second.bin",std::ios::binary);
         const std::vector<unsigned char> a((std::istreambuf_iterator<char>(first)),{}),b((std::istreambuf_iterator<char>(second)),{});
         check(a==std::vector<unsigned char>(64,0x21),"Camera first readback bytes changed");
-        if(mode=="normal")check(b==std::vector<unsigned char>(96,0x42),"Camera second readback bytes changed");
+        check(b==std::vector<unsigned char>(96,0x42),"Camera second readback bytes changed");
         check(fenceWaits==1&&submits==1&&unmaps==1&&copies==2,"Normal camera readback work changed");
     }
     if(recovery)check(!std::filesystem::exists(output/"first.bin"),"Failed readback exported pixels");
