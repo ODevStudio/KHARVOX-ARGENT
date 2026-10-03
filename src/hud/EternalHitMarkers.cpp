@@ -26,14 +26,14 @@ bool installHitMarkerSuppression(unsigned char* base) noexcept {
  constexpr unsigned char consumer[]={0x48,0x8b,0x83,0xc8,1,0,0,0x49,0x39,0x07};
  if(!base||std::memcmp(base+build::rva(rva),entry,sizeof(entry))||
     std::memcmp(base+build::rva(0xefd4c2),consumer,sizeof(consumer))){
-  log("ETERNAL_HITMARKERS refused: signature/expiry consumer mismatch");return false;
+  try{log("ETERNAL_HITMARKERS refused: signature/expiry consumer mismatch");}catch(...){}return false;
  }
  if(MH_CreateHook(base+build::rva(rva),reinterpret_cast<void*>(&updateReticle),reinterpret_cast<void**>(&originalUpdate))!=MH_OK){
-  log("ETERNAL_HITMARKERS refused: hook creation failed");return false;
+  try{log("ETERNAL_HITMARKERS refused: hook creation failed");}catch(...){}return false;
  }
  if(MH_EnableHook(base+build::rva(rva))!=MH_OK){
-  MH_RemoveHook(base+build::rva(rva));log("ETERNAL_HITMARKERS refused: hook enable failed");return false;
+  MH_RemoveHook(base+build::rva(rva));try{log("ETERNAL_HITMARKERS refused: hook enable failed");}catch(...){}return false;
  }
- log("ETERNAL_HITMARKERS disabled=1 policy=expire-before-reticle-update");return true;
+ try{log("ETERNAL_HITMARKERS disabled=1 policy=expire-before-reticle-update");}catch(...){}return true;
 }
 }
