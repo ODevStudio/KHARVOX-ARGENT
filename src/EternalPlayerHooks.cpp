@@ -146,9 +146,14 @@ WeaponIdentity readWeaponIdentity(void* hands){
  if(read(handle+0x30,&generation,4)&&read(handle+0x34,&cached,4)&&generation==cached&&generation!=0x1fffffe&&
     read(handle+0x38,&weapon,8)&&weapon&&read(weapon+0x38,&decl,8)&&decl&&
     read(decl,&table,8)&&table==uintptr_t(image)+build::rva(0x2b1c348)&&read(decl+8,&name,8)&&name){
-  bool terminated=false;
-  for(size_t i=0;i<sizeof(text)-1;++i){if(!read(name+i,text+i,1))break;if(!text[i]){terminated=true;break;}}
-  if(terminated)kind=eternalHapticsWeapon(text);
+  char* end{};
+  if(read(name,text,sizeof(text)-1))end=static_cast<char*>(std::memchr(text,0,sizeof(text)-1));
+  else{
+   std::memset(text,0,sizeof(text));
+   for(size_t i=0;i<sizeof(text)-1;++i){if(!read(name+i,text+i,1))break;if(!text[i]){end=text+i;break;}}
+  }
+  if(end){std::memset(end,0,sizeof(text)-(end-text));kind=eternalHapticsWeapon(text);}
+  else std::memset(text,0,sizeof(text));
  }
  identity.crucible=std::strcmp(text,"weapon/player/crucible")==0;
  identity.hammer=sentinelHammerWeapon(weapon);

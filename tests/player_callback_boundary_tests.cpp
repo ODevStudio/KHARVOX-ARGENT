@@ -1,7 +1,9 @@
 #include <windows.h>
 #include <intrin.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -17,6 +19,8 @@ namespace {
 const std::array<float,9> headBasis{0,.8f,.6f,-1,0,0,0,-.6f,.8f};
 bool throwLogs{},throwNative{};
 unsigned logFailures{},allocationFailures{},nativeCalls{},hideCalls{},showCalls{},laserPublications{};
+unsigned memoryReads{};
+BOOL testReadMemory(HANDLE process,LPCVOID address,LPVOID output,SIZE_T size,SIZE_T* done){++memoryReads;return ReadProcessMemory(process,address,output,size,done);}
 ULONGLONG currentTick=10000;
 uint64_t currentContext=1;
 uintptr_t attachmentResult=0x123401;
@@ -65,7 +69,9 @@ void argentWallImpulseBridge(){}
 }
 #define GetTickCount64 testTick
 #define _ReturnAddress testCaller
+#define ReadProcessMemory testReadMemory
 #include "../src/EternalPlayerHooks.cpp"
+#undef ReadProcessMemory
 #undef _ReturnAddress
 #undef GetTickCount64
 
@@ -140,13 +146,43 @@ struct Objects {
         player::originalItemTransform=&nativeTransform;player::originalThrowItem=&nativeThrow;player::originalFire=&nativeFire;
     }
 };
+void benchmarkIdentity(){
+    Image image;Objects objects(image);std::array<char,256> name{};std::strcpy(name.data(),"weapon/player/crucible");put(objects.decl.data(),8,uintptr_t(name.data()));
+    constexpr unsigned iterations=10000;std::array<double,5> times{};unsigned checksum{};
+    for(unsigned i=0;i<2000;++i)checksum+=argent::player::readWeaponIdentity(objects.hands.data()).crucible;
+    memoryReads=0;
+    for(auto& elapsed:times){const auto start=std::chrono::steady_clock::now();
+        for(unsigned i=0;i<iterations;++i)checksum+=argent::player::readWeaponIdentity(objects.hands.data()).crucible;
+        elapsed=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count()/iterations;
+    }
+    check(checksum==2000+iterations*times.size(),"Identity benchmark lost native classification");std::sort(times.begin(),times.end());
+    std::cout<<"Native weapon identity: median="<<times[2]<<" us/lookup, min="<<times.front()<<", max="<<times.back()<<", reads/lookup="<<double(memoryReads)/(iterations*times.size())<<'\n';
+}
 void arm(std::string_view mode){throwLogs=mode=="log";if(mode=="oom")failAfter=1;}
 void disarm(){throwLogs=false;failAfter=-1;}
 void runCase(std::string_view scenario){
     using namespace argent;using namespace argent::player;
     const auto split=scenario.rfind('-');const auto kind=scenario.substr(0,split),mode=scenario.substr(split+1);
     Image image;Objects objects(image);float origin[3]{4,5,6},axis[9]{};
-    if(kind.rfind("crucible",0)==0){
+    if(kind.rfind("identity",0)==0){
+        std::array<char,256> name{};std::strcpy(name.data(),"weapon/player/crucible");put(objects.decl.data(),8,uintptr_t(name.data()));
+        struct Pages {unsigned char* bytes{};~Pages(){if(bytes)VirtualFree(bytes,0,MEM_RELEASE);}} pages;
+        if(kind=="identity-page-tail"||kind=="identity-page-unterminated"||kind=="identity-unreadable"){
+            SYSTEM_INFO system{};GetSystemInfo(&system);const auto size=system.dwPageSize;pages.bytes=static_cast<unsigned char*>(VirtualAlloc(nullptr,2*size,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+            check(pages.bytes!=nullptr,"Identity boundary allocation failed");const auto length=std::strlen(name.data());const auto copied=length+(kind=="identity-page-tail");
+            const auto source=pages.bytes+size-copied;std::memcpy(source,name.data(),copied);DWORD old{};
+            check(VirtualProtect(pages.bytes+size,size,PAGE_NOACCESS,&old),"Identity boundary protection failed");put(objects.decl.data(),8,uintptr_t(kind=="identity-unreadable"?pages.bytes+size:source));
+        }
+        if(kind=="identity-long"){name.fill('x');std::memcpy(name.data(),"rocket_launcher",15);name.back()=0;}
+        if(kind=="identity-generation")put(objects.hands.data(),0x29b0+0x34,uint32_t(2));
+        if(kind=="identity-decl")put(objects.decl.data(),0,uintptr_t(1));
+        if(kind=="identity-heap")failAfter=1;memoryReads=0;const auto identity=readWeaponIdentity(objects.hands.data());const auto reads=memoryReads;disarm();
+        const bool valid=kind=="identity-bulk"||kind=="identity-page-tail"||kind=="identity-heap";
+        check(identity.crucible==valid&&identity.kind==KharvoxWeaponKind::Unknown&&!identity.hammer&&std::strcmp(identity.profile,valid?"crucible":"default")==0,"Identity accepted an incomplete or unverified native name");
+        check(valid?std::strcmp(identity.name,name.data())==0:identity.name[0]==0,"Identity lost a valid name or retained rejected source bytes");
+        if(kind=="identity-bulk")check(reads<=9,"Native identity still uses byte-at-a-time name reads");
+        if(kind=="identity-heap")check(allocationFailures==0,"Native identity allocated heap storage");
+    }else if(kind.rfind("crucible",0)==0){
         arm(mode);const int type=kind.back()-'0';const auto result=type==0?crucibleEvent<0>(objects.hands.data(),1,2,3,4,5):type==1?crucibleEvent<1>(objects.hands.data(),1,2,3,4,5):crucibleEvent<2>(objects.hands.data(),1,2,3,4,5);disarm();
         check(result==0x1234&&nativeCalls==1,"Crucible observer changed a native result");
         check(mode=="oom"||crucibleEvents.at(uintptr_t(objects.hands.data())).serial==1,"Crucible diagnostic lost the observed native event");
@@ -304,7 +340,7 @@ bool child(const wchar_t* executable,const std::wstring& scenario,bool store,boo
 int main(int argc,char** argv){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);_set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);SetEnvironmentVariableW(L"ARGENT_SFS_PROFILE_TIMING",nullptr);
     try{
-        if(argc>1){argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",argc>3&&std::string_view(argv[3])=="timing"?L"1":L"0");runCase(argv[1]);return 0;}
+        if(argc>1){argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",argc>3&&std::string_view(argv[3])=="timing"?L"1":L"0");if(std::string_view(argv[1])=="identity-benchmark")benchmarkIdentity();else runCase(argv[1]);return 0;}
         wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768),"Player callback path unavailable");unsigned cases{},failures{};
         for(const bool store:{false,true})for(const bool timing:{false,true}){
             for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate",L"attachment"})for(const auto mode:{L"normal",L"log",L"oom"}){
@@ -313,6 +349,7 @@ int main(int argc,char** argv){
             for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"visibility-interleaved",L"visibility-shared",L"visibility-replaced-entity",L"visibility-replaced-model",L"visibility-invalid",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"attachment-failed",L"attachment-failed-high",L"attachment-native",L"attachment-guard-caller",L"attachment-guard-owner",L"attachment-guard-item",L"attachment-guard-root",L"attachment-guard-stale",L"attachment-guard-profile",L"attachment-guard-placement",L"attachment-rest-swing",L"attachment-rest-failed",L"attachment-rest-context",L"attachment-rest-manual"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"attachment-guard-gameplay",L"attachment-guard-context",L"attachment-guard-scripted",L"attachment-guard-monkey",L"attachment-guard-drone",L"attachment-guard-authored"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"identity-bulk",L"identity-page-tail",L"identity-page-unterminated",L"identity-unreadable",L"identity-long",L"identity-generation",L"identity-decl",L"identity-heap"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){disarm();std::cerr<<error.what()<<'\n';return 1;}
