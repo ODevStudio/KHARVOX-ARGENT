@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
@@ -40,6 +41,7 @@ class SourceRing {
     }
     void publishImages(const Chain& chain) {
         std::unique_lock<std::shared_mutex> lock(imagesMutex_);
+        ownedImages_.reserve(ownedImages_.size()+chain.count);
         for(const auto& slot:chain.slots)if(slot.image)ownedImages_.push_back(slot.image);
     }
     // Withdraw before the images are destroyed so a recycled driver handle
@@ -73,11 +75,20 @@ public:
         return std::find(ownedImages_.begin(),ownedImages_.end(),image)!=ownedImages_.end();
     }
     VkResult create(const VkSwapchainCreateInfoKHR& input,VkSwapchainKHR* output) {
-        if(!output||input.flags||input.pNext||input.imageArrayLayers!=2||!input.imageExtent.width||!input.imageExtent.height||input.minImageCount>5)
-            return VK_ERROR_FEATURE_NOT_PRESENT;
+        if(!output)return VK_ERROR_FEATURE_NOT_PRESENT;
+        *output=VK_NULL_HANDLE;
+        try{
         std::lock_guard<std::mutex> lock(mutex_);
-        if(input.oldSwapchain&&!chains_.count(input.oldSwapchain))return VK_ERROR_INITIALIZATION_FAILED;
-        auto chain=std::make_unique<Chain>();chain->count=(std::max)(input.minImageCount,2u);
+        if(input.oldSwapchain){
+            const auto previous=chains_.find(input.oldSwapchain);
+            if(previous==chains_.end()||previous->second->retired)return VK_ERROR_INITIALIZATION_FAILED;
+            previous->second->retired=true;
+        }
+        if(input.flags||input.pNext||input.imageArrayLayers!=2||!input.imageExtent.width||!input.imageExtent.height||input.minImageCount>5)
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        const auto rollback=[this](Chain* chain){if(chain){withdrawImages(*chain);dispose(*chain);delete chain;}};
+        std::unique_ptr<Chain,decltype(rollback)> chain(new Chain{},rollback);
+        chain->count=(std::max)(input.minImageCount,2u);
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};info.imageType=VK_IMAGE_TYPE_2D;
         info.format=input.imageFormat;info.extent={input.imageExtent.width,input.imageExtent.height,1};
         info.mipLevels=1;info.arrayLayers=2;info.samples=VK_SAMPLE_COUNT_1_BIT;info.tiling=VK_IMAGE_TILING_OPTIMAL;
@@ -85,25 +96,36 @@ public:
         info.sharingMode=input.imageSharingMode;info.queueFamilyIndexCount=input.queueFamilyIndexCount;info.pQueueFamilyIndices=input.pQueueFamilyIndices;
         for(uint32_t n=0;n<chain->count;++n){
             auto& slot=chain->slots[n];
-            auto result=vkCreateImage(device_,&info,nullptr,&slot.image);
-            if(result!=VK_SUCCESS){dispose(*chain);return result;}
+            VkImage image{};
+            auto result=vkCreateImage(device_,&info,nullptr,&image);
+            if(result!=VK_SUCCESS)return result;
+            slot.image=image;
             VkMemoryRequirements requirements{};vkGetImageMemoryRequirements(device_,slot.image,&requirements);
             uint32_t type=UINT32_MAX;
             for(uint32_t n=0;n<memory_.memoryTypeCount;++n)if((requirements.memoryTypeBits&(1u<<n))&&(memory_.memoryTypes[n].propertyFlags&VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)){type=n;break;}
-            if(type==UINT32_MAX){dispose(*chain);return VK_ERROR_FEATURE_NOT_PRESENT;}
+            if(type==UINT32_MAX)return VK_ERROR_FEATURE_NOT_PRESENT;
             VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};dedicated.image=slot.image;
             VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.pNext=&dedicated;allocation.allocationSize=requirements.size;allocation.memoryTypeIndex=type;
-            result=vkAllocateMemory(device_,&allocation,nullptr,&slot.memory);
-            if(result==VK_SUCCESS)result=vkBindImageMemory(device_,slot.image,slot.memory,0);
+            VkDeviceMemory memory{};
+            result=vkAllocateMemory(device_,&allocation,nullptr,&memory);
+            if(result!=VK_SUCCESS)return result;
+            slot.memory=memory;
+            result=vkBindImageMemory(device_,slot.image,slot.memory,0);
+            if(result!=VK_SUCCESS)return result;
             VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-            if(result==VK_SUCCESS)result=vkCreateFence(device_,&fence,nullptr,&slot.retired);
-            if(result!=VK_SUCCESS){dispose(*chain);return result;}
+            VkFence retired{};
+            result=vkCreateFence(device_,&fence,nullptr,&retired);
+            if(result!=VK_SUCCESS)return result;
+            slot.retired=retired;
         }
         const auto handle=reinterpret_cast<VkSwapchainKHR>(chain.get());
         publishImages(*chain);
-        chains_.emplace(handle,std::move(chain));
-        if(input.oldSwapchain)chains_.at(input.oldSwapchain)->retired=true;
+        const auto inserted=chains_.try_emplace(handle);
+        if(!inserted.second)return VK_ERROR_INITIALIZATION_FAILED;
+        inserted.first->second.reset(chain.release());
         *output=handle;return VK_SUCCESS;
+        }catch(const std::bad_alloc&){return VK_ERROR_OUT_OF_HOST_MEMORY;}
+        catch(...){return VK_ERROR_INITIALIZATION_FAILED;}
     }
     VkResult enumerate(VkSwapchainKHR handle,uint32_t* count,VkImage* images) {
         std::lock_guard<std::mutex> lock(mutex_);auto found=chains_.find(handle);
