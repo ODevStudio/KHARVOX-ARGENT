@@ -167,61 +167,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(VkDevice d,VkSwapchainKHR
  return s->proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR")(d,sc,count,images);
 }
 #include "LayerFramePreparation.inc"
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const VkAllocationCallbacks* a,VkSwapchainKHR* out){
-    auto s=deviceOf(key(d));auto modified=*ci;bool copy=false;
-    if(s->sfs&&argent::sfs::sourceRingRequested()){
-      if(!s->graphicsQueue)return VK_ERROR_INITIALIZATION_FAILED;
-      if(!argent::sfs::sourceRingActive(d)){VkPhysicalDeviceMemoryProperties mem{};
-       reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceMemoryProperties"))(s->physical,&mem);
-       if(!argent::sfs::configureSourceRing(d,s->gdpa,mem,s->graphicsQueue,s->queueMutex.get()))return VK_ERROR_INITIALIZATION_FAILED;}
-      if(ci->oldSwapchain){auto old=s->mirrors.find(ci->oldSwapchain);if(old!=s->mirrors.end()){old->second->destroy(*s);s->mirrors.erase(old);}}
-      modified.imageArrayLayers=2;
-      char fsr[8]{};
-      if(GetEnvironmentVariableA("ARGENT_FSR1",fsr,sizeof(fsr))==1&&fsr[0]=='1'
-          &&(ci->imageFormat==VK_FORMAT_R8G8B8A8_UNORM||ci->imageFormat==VK_FORMAT_B8G8R8A8_UNORM)){
-        const auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceImageFormatProperties"));
-        const auto formatQuery=reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(s->gipa(s->instance,"vkGetPhysicalDeviceFormatProperties"));
-        VkImageFormatProperties properties{};VkFormatProperties features{};
-        const auto usage=modified.imageUsage|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
-        if(formatQuery)formatQuery(s->physical,ci->imageFormat,&features);
-        if(query&&(features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
-            &&query(s->physical,ci->imageFormat,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&properties)==VK_SUCCESS
-            &&properties.maxExtent.width>=ci->imageExtent.width&&properties.maxExtent.height>=ci->imageExtent.height
-            &&properties.maxArrayLayers>=2&&(properties.sampleCounts&VK_SAMPLE_COUNT_1_BIT))
-          modified.imageUsage|=VK_IMAGE_USAGE_SAMPLED_BIT;
-      }
-      if(s->queueFamilies.size()>1){modified.imageSharingMode=VK_SHARING_MODE_CONCURRENT;modified.queueFamilyIndexCount=uint32_t(s->queueFamilies.size());modified.pQueueFamilyIndices=s->queueFamilies.data();}
-      auto r=argent::sfs::createSourceSwapchain(d,modified,out);if(r!=VK_SUCCESS){argent::log("SFS_SOURCE_CREATE_FAILED result="+std::to_string(r));return r;}
-      argent::Source source;source.extent=ci->imageExtent;source.format=ci->imageFormat;source.displaySrgb=ci->imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;source.transferable=true;uint32_t count{};
-      source.sampled=(modified.imageUsage&VK_IMAGE_USAGE_SAMPLED_BIT)!=0;
-      argent::sfs::sourceImages(d,*out,&count,nullptr);source.images.resize(count);argent::sfs::sourceImages(d,*out,&count,source.images.data());
-      argent::sfs::swapchainImages(d,*out,count,source.images.data());
-      {std::lock_guard<std::recursive_mutex> lock(stateMutex);s->sources[*out]=std::move(source);}
-      auto mirror=std::make_unique<argent::DesktopMirror>();try{if(mirror->create(*s,*ci)){s->mirrors[*out]=std::move(mirror);}else argent::log("SFS_DESKTOP unavailable");}catch(const std::exception& e){mirror->destroy(*s);argent::log(e.what());}
-      argent::log("SFS_SOURCE_SWAPCHAIN "+std::to_string(ci->imageExtent.width)+"x"+std::to_string(ci->imageExtent.height)+" requestedPresentMode="+std::to_string(ci->presentMode));return r;
-    }
-    if(s->game){
-        VkSurfaceCapabilitiesKHR caps{};
-        auto query=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(s->gipa(s->instance,"vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
-        copy=query&&query(s->physical,ci->surface,&caps)==VK_SUCCESS&&(caps.supportedUsageFlags&VK_IMAGE_USAGE_TRANSFER_SRC_BIT)&&ci->imageArrayLayers==1;
-        if(copy)modified.imageUsage|=VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    }
-    auto r=s->proc<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(d,&modified,a,out);
-    if(r==VK_SUCCESS&&s->game){
-        argent::Source source;source.extent=ci->imageExtent;source.format=ci->imageFormat;source.displaySrgb=ci->imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;source.transferable=copy;
-        auto images=s->proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");uint32_t count=0;
-        if(images(d,*out,&count,nullptr)==VK_SUCCESS){source.images.resize(count);if(images(d,*out,&count,source.images.data())!=VK_SUCCESS)source.transferable=false;}
-        {std::lock_guard<std::recursive_mutex> l(stateMutex);s->sources[*out]=std::move(source);}
-        argent::log("SWAPCHAIN "+std::to_string(ci->imageExtent.width)+"x"+std::to_string(ci->imageExtent.height)+" format="+std::to_string(ci->imageFormat)+" transferable="+std::to_string(copy));
-    }
-    return r;
-}
-VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(VkDevice d,VkSwapchainKHR sc,const VkAllocationCallbacks* a){
-    auto s=deviceOf(key(d));auto mirror=s->mirrors.find(sc);if(mirror!=s->mirrors.end()){mirror->second->destroy(*s);s->mirrors.erase(mirror);}
-    {std::lock_guard<std::recursive_mutex> l(stateMutex);s->sources.erase(sc);}
-    if(argent::sfs::sourceSwapchain(d,sc)){argent::cancelStereoFrame();argent::retireStereoSources(d);argent::sfs::swapchainDestroyed(d,sc);argent::sfs::destroySourceSwapchain(d,sc);}
-    else s->proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(d,sc,a);
-}
+#include "LayerSwapchainLifecycle.inc"
 #include "LayerFramePresentation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue q,uint32_t n,const VkSubmitInfo* p,VkFence f){
  auto s=deviceOf(key(q));static argent::FrameTiming::Totals total;argent::FrameTiming timing("gameQueueSubmitTotal",total);
