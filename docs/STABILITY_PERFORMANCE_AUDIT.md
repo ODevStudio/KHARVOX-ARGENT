@@ -25,7 +25,7 @@ and record them here after each subsystem.
 Documentation checkpoints: `030b9f4`, `4554f1e`, `fa93971`, `ae0b4c2`,
 `0d2a56d`, `95fde2b`, `ee72ebc`, `4476e5b`, `377d2be`, `079f5bf`, `6923f92`,
 `5d121be`, `ae440fb`, `a371dd1`, `498e876`, `9cf2fe1`, `f3c6090`, `4839406`,
-`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, `1b2d47a`, `b21fe2d`, `093e147`, and `ef4acb8`.
+`7b3c206`, `2a66aeb`, `fea8723`, `d529efe`, `d6589a1`, `2261177`, `b801747`, `a12aceb`, `f1c667e`, `1b2d47a`, `b21fe2d`, `093e147`, `ef4acb8`, and `222a4db`.
 These record audit evidence rather than changing runtime behavior.
 
 Synthetic CPU measurements from the previous implementation work saved about
@@ -40,14 +40,14 @@ payloads still retire GPU use before overwriting the single buffer.
 | --- | --- | --- |
 | Startup, launcher, device/runtime negotiation | Outer instance/device failures fixed; native startup pending | Four real probe subprocess scenarios, eighty-three startup/extension scenarios, fifty-eight session/swapchain scenarios, sixty-eight runtime Vulkan-creation scenarios, thirty-five outer instance scenarios and sixty-two outer device scenarios pass. Initialization publishes failure before guarded diagnostics; valid extension lists survive optional logging failures. Missing GPU-verification dispatch rejects setup before resource creation; partial session resources retire through existing shutdown. The creation callback preserves runtime-added features while copying downstream loader records. Outer instance/device registration rolls back native ownership on setup failure and caches cleanup dispatch. Device rollback retires initialized SFS state and attempted camera activation, including binding failure after registration. Complete GUI launch and native loader/runtime startup remain to verify. |
 | Game interception, SFS shaders and command replay | SFS setup ownership fixed; broader review in progress | Fourteen GPU-backed initialization cases preserve valid resources despite diagnostic failures, retire failed setup before logging, leave failed state unpublished and verify a clean retry. Reviewed `NativeSfs.cpp`, `NativeDispatch.h`, `StereoResources.h`, and `TimestampQueries.inc`. Real GPU query aggregation, compute-state restoration, and warmed replay pass while an unrelated metadata writer is blocked. Broader shader variants and outer frame interception remain to verify. |
-| SFS frame publication and stereo source ownership | Queue deadlock and creation rollback fixed; outer lifecycle pending | All 106 source-creation checks pass, covering host/native allocation failures, failed-output ownership, registry rollback and old-chain retirement. Existing exhausted-acquire/present concurrency, queue exclusion, fence independence, publication, metadata progression, completion-gated retirement and real GPU recreation checks pass. Keep changed-payload device retirement; asynchronous uniforms require lifetime design and runtime evidence. |
+| SFS frame publication and stereo source ownership | Queue deadlock and inner/outer creation rollback fixed; native lifecycle pending | All 106 source-creation and fifty-five outer-lifecycle cases pass, covering allocation/native failures, registry rollback, old-chain retirement, bounded enumeration, mirror isolation and cancellation-safe teardown. Existing queue, publication, metadata, completion-gated retirement and real GPU recreation checks pass. Keep changed-payload device retirement; asynchronous uniforms require lifetime design and runtime evidence. |
 | FSR1 | GPU path reviewed; source retirement fixed | Fresh eight-format/path GPU checks pass direct sampling, sRGB fallback, failed source-view setup, abandoned recordings and OOM submission recovery. Isolated stereo GPU benchmark measured about 0.012 ms median savings on RTX 4090. Source destruction now requires verified queue retirement or device loss. Headset teardown remains unverified. |
 | Hand/depth rendering and HUD | Hand and pause-texture retirement fixed; wider HUD review pending | Verified uploads and renderer destruction require queue completion or device loss. Failed command reset disables the affected model without recording. Hand GPU/layout tests and five pause-upload call-site scenarios pass; wider HUD/input paths remain to inspect. |
 | OpenXR frame loop and image handoff | Frame recovery and outer diagnostics fixed; native lifecycle pending | Fifty-one production outer-caller scenarios pass, preserving wait consumption, source completion, publication and Vulkan results despite optional failures. Twenty-two stereo-begin, 115 flat-present/preparation/event, ninety-nine stereo-present, eight shutdown, twenty controller-lifecycle and fifty-eight session/swapchain scenarios also pass. Native runtime events, image loss and headset shutdown remain to verify. |
-| Desktop mirror | Fixed; headset validation pending | Stop unsafe retries after terminal acquire/record/submit/wait/present errors; preserve timeout/suboptimal behavior. Clear destroyed handles so partial recreation cannot double-destroy prior resources. Recover completion before returning a borrowed XR eye after a failed mirror wait. Preserve the existing one-shot blank and 60 FPS cadence. |
+| Desktop mirror | Presentation and outer ownership fixed; internal setup audit pending | Stop unsafe terminal retries; preserve timeout/suboptimal behavior, one-shot blank and 60 FPS cadence. Clear destroyed handles, retire borrowed XR reads after failed waits, and isolate outer mirror allocation/setup/registration failures from valid stereo sources. Failed native outputs and internal setup allocations still need auditing; headset validation remains pending. |
 | Diagnostics and capture | Frame reporting and eye-readback retirement fixed; broader capture review pending | Frame timing contains diagnostic exceptions, including stack unwinding. Timeline reporting clears its bounded record window before formatting and rejects failed streams. Eleven focused checks cover allocation failure, full/timed-window recovery and unchanged disabled behavior. Production readback rejects unsafe cleanup after a failed recovery wait; six isolated call-site scenarios and real GPU pixel export pass. Other capture lifetimes remain to inspect. |
 | Input, camera/game hooks, and external integrations | IPC ownership and controller teardown exceptions fixed; broader review in progress | Client start/stop/retirement are serialized; a session restart waits for the prior stopping worker outside the lifetime lock. Controller cleanup now reaches both IPC stop requests and input clearing despite optional shutdown failures. Eight original controller regressions fail; twenty fixed lifecycle scenarios and native IPC restart checks pass. State restoration, broader input, per-frame work and complete unload remain to inspect. |
-| Build, test, packaging, and end-to-end verification | All focused checks pass; package and native verification pending | All eighty checks pass in 43.53 seconds, including 106 source-creation and fifty-one outer-frame scenarios. A delayed writer reproduces the launcher fixture's competing timeout; test-only prebuffering isolates the unchanged production byte cap. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
+| Build, test, packaging, and end-to-end verification | All focused checks pass; package and native verification pending | All eighty-one checks pass in 42.92 seconds, including 106 source-creation, fifty-five outer-swapchain and fifty-one outer-frame scenarios. A delayed writer reproduces the launcher fixture's competing timeout; test-only prebuffering isolates the unchanged production byte cap. Full package linking, native headset lifecycle and gameplay benchmarks remain unverified. |
 
 ## New Audit Commits
 
@@ -83,6 +83,7 @@ payloads still retire GPU use before overwriting the single buffer.
 | `9ca477c` | Launcher verification / probe output collection | Stability (tests) | Prebuffer more than the unchanged 1 MiB cap before the flood collection deadline; retain strict termination/time bounds and add a delayed writer. The previous fixture rejects a valid timeout after 300 ms startup delay. All five subprocess cases and the full seventy-eight-check suite pass. |
 | `58c4a5a` | Outer frame acquisition / presentation | Stability | Guard optional logging, debug markers, readback, mirror handlers and tracing; cancel before checkpoint allocation and retain Vulkan results when cancellation reports failure. The initial forty-four-case fixture reproduces twenty-four failures. All fifty-one strengthened production-caller scenarios and the full seventy-nine-check suite pass. |
 | `9cd024c` | SFS source-ring creation and replacement | Stability | Roll back partial native and registry ownership, clear failed outputs and retire valid old chains before replacement. The original fixture reports 112 failures; all 106 final checks pass after reducing implementation allocation boundaries. The full eighty-check suite passes; detailed evidence is linked below. |
+| `96a5716` | Outer native/SFS swapchain creation and teardown | Stability | Keep native ownership local until registration, validate bounded enumeration, contain optional mirror/diagnostic failures and continue retirement after cancellation errors. Thirty initial regressions fail; all fifty-five strengthened cases and the full eighty-one-check suite pass. Detailed evidence is linked below. |
 
 ## Subsystem Evidence
 
@@ -92,6 +93,7 @@ Frame diagnostics: [bounded-buffer and exception recovery](FRAME_DIAGNOSTICS_AUD
 Probe fixture: [scheduling regression and deterministic byte-cap check](PROBE_FIXTURE_AUDIT.md).
 Outer frame callers: [diagnostic isolation and retirement evidence](OUTER_FRAME_CALLER_AUDIT.md).
 Source-ring creation: [allocation rollback and replacement retirement](SOURCE_RING_CREATION_AUDIT.md).
+Outer swapchain lifecycle: [registration, mirror isolation and teardown](OUTER_SWAPCHAIN_OWNERSHIP_AUDIT.md).
 
 ### Outer Vulkan Instance Ownership
 
@@ -780,21 +782,19 @@ also compiles. These checks do not simulate a real GPU hang or memory pressure.
 ## Verification Limits
 
 The focused harness compiles both layer units, SFS, hands, FSR, launcher and all four IPC units.
-With source-ring fix `9cd024c`, all 80 CTest checks pass in 43.53 seconds.
-Raw checks cover 106 source creation, fifty-one outer frame, eleven diagnostics,
+With outer-swapchain fix `96a5716`, all 81 CTest checks pass in 42.92 seconds.
+Raw checks cover 106 source creation, fifty-five outer swapchain, fifty-one outer frame and eleven diagnostics,
 thirty-five outer instance, sixty-eight runtime creation and sixty-two outer device scenarios. Coverage
 includes queue concurrency and GPU-backed shader/rendering checks,
 GPU lifetime gates, readback/pause upload, launcher subprocesses, IPC cancellation
 and worker ownership, controller action lifecycle, stereo begin/present,
 flat/prepared presentation, session events, partial session/swapchain creation
 and shutdown diagnostics, plus fourteen GPU-backed SFS setup/ownership checks.
-The frame/session fixtures cover 115 flat/preparation/event and fifty-eight
-session/swapchain scenarios, including terminal setup-failure isolation.
+Frame/session fixtures cover 115 flat/preparation/event and fifty-eight setup/teardown scenarios.
 Raw diffs and diagnostics were inspected; existing warnings are `/DNDEBUG` versus
 `/UNDEBUG` and a synthetic mirror handle conversion. Full audit/package verification
-still needs glslang optimizer libraries, the bHaptics SDK DLL and a native headset/gameplay run.
-A real 120-300 second combat capture with the desktop mirror disabled must measure
+still needs glslang optimizer libraries, the bHaptics SDK DLL and native headset/gameplay validation.
+A 120-300 second combat capture with the desktop mirror disabled must measure
 FPS, CPU/GPU bottlenecks and tail latency; synthetic timings are not a substitute.
 
-Next: outer swapchain/core allocation ownership, broader shaders, HUD/game hooks,
-input/integrations and capture. No full-audit completion is claimed.
+Next: mirror/core SFS allocation ownership, shaders, HUD/hooks, input and capture. No completion is claimed.
