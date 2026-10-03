@@ -24,8 +24,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <map>
 #include <fstream>
@@ -33,7 +35,7 @@
 namespace {
 std::recursive_mutex stateMutex;
 template<class H> void* key(H h){return h?*reinterpret_cast<void**>(h):nullptr;}
-struct Instance { VkInstance handle{}; PFN_vkGetInstanceProcAddr gipa{}; PFN_GetPhysicalDeviceProcAddr physicalProc{}; PFN_vkCreateDevice createDevice{}; bool game{},runtimeAuxiliary{}; VkDebugUtilsMessengerEXT addressMessenger{}; };
+struct Instance { VkInstance handle{}; PFN_vkGetInstanceProcAddr gipa{}; PFN_GetPhysicalDeviceProcAddr physicalProc{}; PFN_vkCreateDevice createDevice{}; bool game{},runtimeAuxiliary{}; VkDebugUtilsMessengerEXT addressMessenger{}; PFN_vkDestroyInstance destroy{}; PFN_vkDestroyDebugUtilsMessengerEXT destroyMessenger{}; };
 struct State : argent::Device {
     inline static std::atomic<uint64_t> nextDispatchId{1};
     const uint64_t dispatchId=nextDispatchId.fetch_add(1,std::memory_order_relaxed);
@@ -145,52 +147,7 @@ PFN_vkVoidFunction surfaceIntercept(const char* n,PFN_vkVoidFunction next){
     if(!strcmp(n,"vkGetPhysicalDeviceSurfaceCapabilities2KHR"))return reinterpret_cast<PFN_vkVoidFunction>(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
     return next;
 }
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* ci,const VkAllocationCallbacks* a,VkInstance* out){
-    InstanceCreateScope createScope;
-    auto c=chain<VkLayerInstanceCreateInfo>(ci->pNext,VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO,VK_LAYER_LINK_INFO);
-    if(!c||!c->u.pLayerInfo)return VK_ERROR_INITIALIZATION_FAILED;
-    auto link=c->u.pLayerInfo;auto get=link->pfnNextGetInstanceProcAddr;auto pg=link->pfnNextGetPhysicalDeviceProcAddr;c->u.pLayerInfo=link->pNext;
-    bool game=gameProcess()&&!createScope.nested;
-    const char* app=ci->pApplicationInfo?ci->pApplicationInfo->pApplicationName:nullptr;
-    if(app&&std::strstr(app,"steamvr"))game=false;
-    const bool nested=createScope.nested;
-    const auto runtimeKind=kharvox::classifyOpenXRRuntime(kharvox::activeOpenXRRuntimeManifest());
-    const bool steamRuntimeAuxiliary=gameProcess()&&kharvox::shouldPassthroughSteamRuntimeAuxiliary(runtimeKind,nested,app?app:"");
-    if(game){argent::installStartupCrashTrace();argent::log(std::string("vkCreateInstance app=")+(app?app:"unknown"));}
-    if(steamRuntimeAuxiliary)argent::log(std::string("SteamVR auxiliary Vulkan instance passthrough app=")+(app?app:"unknown")+" nested="+std::to_string(nested));
-    if(game&&argent::sfs::vrEnabled()&&argent::sfs::sourceRingRequested()){
-        auto extent=requestedEyeExtent();
-        if(extent.width&&extent.height&&!argent::camera::installRenderExtent(extent.width,extent.height)){argent::log("ETERNAL_RENDER_EXTENT refused: unsupported engine accessors");return VK_ERROR_INITIALIZATION_FAILED;}
-    }
-    auto required=game&&(!argent::sfs::nativeProbeEnabled()||argent::sfs::vrEnabled())&&argent::initializeXR()?argent::xrExtensions(false):std::vector<std::string>{};
-    bool addressDebug=false;char gpuDiagnostics[8]{};
-    if(game&&GetEnvironmentVariableA("ARGENT_GPU_DIAGNOSTICS",gpuDiagnostics,8)==1&&gpuDiagnostics[0]=='1'){
-        auto enumerate=reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(get(nullptr,"vkEnumerateInstanceExtensionProperties"));
-        uint32_t count{};if(enumerate&&enumerate(nullptr,&count,nullptr)==VK_SUCCESS){std::vector<VkExtensionProperties> props(count);
-            if(enumerate(nullptr,&count,props.data())==VK_SUCCESS)for(const auto& prop:props)if(!std::strcmp(prop.extensionName,VK_EXT_DEBUG_UTILS_EXTENSION_NAME))addressDebug=true;}
-        if(addressDebug)required.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    }
-    auto enabled=extensions(ci->enabledExtensionCount,ci->ppEnabledExtensionNames,required);
-    auto modified=*ci;modified.enabledExtensionCount=uint32_t(enabled.size());modified.ppEnabledExtensionNames=enabled.data();
-    auto create=reinterpret_cast<PFN_vkCreateInstance>(get(nullptr,"vkCreateInstance"));
-    VkResult r=VK_ERROR_INITIALIZATION_FAILED;
-    if(steamRuntimeAuxiliary)r=create?create(ci,a,out):VK_ERROR_INITIALIZATION_FAILED;
-    else if(!game||!argent::xrCreateGameInstance(get,&modified,a,out,r))r=create(&modified,a,out);
-    if(r==VK_SUCCESS){
-        Instance state{*out,get,pg,reinterpret_cast<PFN_vkCreateDevice>(get(*out,"vkCreateDevice")),game,steamRuntimeAuxiliary};
-        if(addressDebug){auto messenger=reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(get(*out,"vkCreateDebugUtilsMessengerEXT"));
-            VkDebugUtilsMessengerCreateInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};info.messageSeverity=VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;info.messageType=VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT;info.pfnUserCallback=argent::gpuAddressCallback;
-            const auto mr=messenger?messenger(*out,&info,nullptr,&state.addressMessenger):VK_ERROR_EXTENSION_NOT_PRESENT;
-            argent::log("GPU_ADDRESS_MESSENGER result="+std::to_string(mr));}
-        std::lock_guard<std::recursive_mutex> l(stateMutex);instances[key(*out)]=state;
-    }
-    if(game)argent::log("vkCreateInstance result="+std::to_string(r));return r;
-}
-VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance i,const VkAllocationCallbacks* a){
-    auto s=instanceOf(key(i));{std::lock_guard<std::recursive_mutex> l(stateMutex);instances.erase(key(i));}
-    if(s.addressMessenger)reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(s.gipa(i,"vkDestroyDebugUtilsMessengerEXT"))(i,s.addressMessenger,nullptr);
-    if(s.gipa)reinterpret_cast<PFN_vkDestroyInstance>(s.gipa(i,"vkDestroyInstance"))(i,a);
-}
+#include "LayerInstanceCreation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice p,const VkDeviceCreateInfo* ci,const VkAllocationCallbacks* a,VkDevice* out){
     auto c=chain<VkLayerDeviceCreateInfo>(ci->pNext,VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO,VK_LAYER_LINK_INFO);
     if(!c||!c->u.pLayerInfo)return VK_ERROR_INITIALIZATION_FAILED;
