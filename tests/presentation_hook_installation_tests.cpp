@@ -33,7 +33,7 @@ unsigned char* imageBytes{};
 uintptr_t failCreate{},failEnable{},failRemove{};
 unsigned createCalls{},enableCalls{},invalidCleanup{},logCalls{},logFailures{},allocationFailures{};
 unsigned logFailureAt{},nativeCalls{};
-bool throwLogs{},missingDependencies{},throwRead{};
+bool throwLogs{},missingDependencies{},throwRead{},nativeThrows{};
 std::atomic<int> failAfter{-1};
 std::atomic<bool> blockCreate{};
 HANDLE createEntered{},releaseCreate{},secondFinished{};
@@ -168,7 +168,7 @@ void runCase(std::string_view scenario){
 }
 void __fastcall nativeMenu(void* object,int transition){++nativeCalls;nativeObject=object;nativeTransition=transition;}
 void __fastcall nativeOpen(void* object,void* event){++nativeCalls;nativeObject=object;nativeEvent=event;}
-void __fastcall nativeClose(void* object){++nativeCalls;nativeObject=object;}
+void __fastcall nativeClose(void* object){++nativeCalls;nativeObject=object;if(nativeThrows)throw std::bad_alloc{};}
 void runCallback(std::string_view scenario){
     using namespace argent::presentation;
     const auto kind=scenario.substr(9,scenario.rfind('-')-9);
@@ -186,19 +186,32 @@ void runCallback(std::string_view scenario){
     else if(kind=="death-hide"){deathScreen=uintptr_t(owner);deathHide(owner,2);check(!deathScreen.load(),"Death-hide diagnostic retained the menu");}
     else if(kind=="dossier-open"){dossierOpen(owner,frame.data());check(dossierScreen.load()==uintptr_t(owner)&&nativeEvent==frame.data(),"Dossier-open diagnostic changed the event or menu");}
     else if(kind=="dossier-close"){dossierScreen=uintptr_t(owner);dossierClose(owner);check(!dossierScreen.load(),"Dossier-close diagnostic retained the menu");}
+    else if(kind=="upgrade-foreign"){upgradeScreen=playerAddress;upgradeHide(owner,0);check(upgradeScreen.load()==playerAddress,"Upgrade-hide diagnostic cleared another menu owner");}
+    else if(kind=="death-foreign"){deathScreen=playerAddress;deathHide(owner,0);check(deathScreen.load()==playerAddress,"Death-hide diagnostic cleared another menu owner");}
+    else if(kind=="dossier-foreign"){dossierScreen=playerAddress;dossierClose(owner);check(dossierScreen.load()==playerAddress,"Dossier-close diagnostic cleared another menu owner");}
     else {
         frame[0x40]=frame[0x41]=1;frame[0x8219]=1;std::memcpy(screen.data()+0x2a50,&frameAddress,8);player=0;
+        latest.tick=9999;latest.valid=true;latest.inGame=true;
         if(kind=="frame-null"){storeConsumer=true;std::memset(screen.data()+0x2a50,0,8);}
         else if(kind=="frame-invalid"){storeConsumer=true;frame[0x40]=2;}
         else if(kind=="frame-first")storeConsumer=true;
         else if(kind=="frame-drone"){player=playerAddress;playerVtable=previousType;std::memcpy(playerBytes.data(),&previousType,8);upgradeAnimationOwner=playerAddress;playerBytes[0xd2c8+0x8da5]=0x80;}
-        else if(kind=="frame-report-final"){if(throwLogs)logFailureAt=2;}
+        else if(kind=="frame-report-final"){if(throwLogs)logFailureAt=2;if(allocation)failAfter=2;}
         else if(kind=="frame-observer"){throwRead=true;throwLogs=false;failAfter=-1;}
+        else if(kind=="frame-native-throw")nativeThrows=true;
+        else if(kind=="frame-menu"||kind=="frame-absent"){
+            storeConsumer=true;frame[kind=="frame-menu"?0x41:0x40]=0;player=playerAddress;playerTick=123;
+            upgradeScreen=dossierScreen=deathScreen=upgradeAnimationOwner=playerAddress;pauseSession.show(playerAddress);
+        }
         else check(kind=="frame-report-first","Unknown callback scenario");
         if(kind=="frame-report-final"&&throwLogs)throwLogs=false;
-        consumeFrame(owner);
-        if(kind!="frame-null"&&kind!="frame-invalid"&&kind!="frame-observer")check(latest.tick==testTick()&&latest.valid&&latest.inGame&&latest.paused,"Frame diagnostic skipped sample publication");
+        if(nativeThrows){bool propagated{};try{consumeFrame(owner);}catch(const std::bad_alloc&){propagated=true;}check(propagated,"Frame observer swallowed a native exception");}
+        else consumeFrame(owner);
+        if(kind=="frame-null"||kind=="frame-invalid"||kind=="frame-observer")check(latest.tick==9999&&latest.valid&&latest.inGame,"Rejected frame replaced the published sample");
+        else if(kind=="frame-menu"||kind=="frame-absent")check(latest.tick==testTick()&&(!latest.valid||!latest.inGame)&&!player.load()&&!playerTick.load()&&!upgradeScreen.load()&&!dossierScreen.load()&&!deathScreen.load()&&!upgradeAnimationOwner.load()&&!pauseSession.active(),"Menu frame retained stale player or menu ownership");
+        else check(latest.tick==testTick()&&latest.valid&&latest.inGame&&latest.paused,"Frame diagnostic skipped sample publication");
         if(kind=="frame-drone")check(latest.interaction&&droneAnimation.load(),"Drone diagnostic lost native animation classification");
+        if(kind=="frame-report-final"&&allocation)check(logCalls==1,"Final-report OOM hit the wrong diagnostic");
     }
     failAfter=-1;
     check(nativeCalls==1&&nativeObject==owner,"Observer diagnostic skipped or changed the native callback");
@@ -230,8 +243,8 @@ int main(int argc,char** argv){
                 for(unsigned i=0;i<9;++i){++cases;failures+=!child(executable,L"signature-"+std::to_wstring(i),store);for(const auto prefix:{L"create-",L"enable-",L"conflict-",L"remove-fatal-"}){++cases;failures+=!child(executable,prefix+std::to_wstring(i),store);}}
             }
             if(!installationOnly){
-                for(const auto kind:{L"pause-show",L"pause-hide-child",L"pause-hide-force",L"upgrade-show",L"upgrade-hide",L"death-show",L"death-hide",L"dossier-open",L"dossier-close",L"frame-null",L"frame-invalid",L"frame-first",L"frame-drone",L"frame-report-first"})for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-"+std::wstring(kind)+L"-"+mode,store);}
-                for(const auto scenario:{L"callback-frame-report-final-normal",L"callback-frame-report-final-log",L"callback-frame-observer-normal"}){++cases;failures+=!child(executable,scenario,store);}
+                for(const auto kind:{L"pause-show",L"pause-hide-child",L"pause-hide-force",L"upgrade-show",L"upgrade-hide",L"death-show",L"death-hide",L"dossier-open",L"dossier-close",L"upgrade-foreign",L"death-foreign",L"dossier-foreign",L"frame-null",L"frame-invalid",L"frame-first",L"frame-drone",L"frame-report-first",L"frame-report-final",L"frame-menu",L"frame-absent"})for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-"+std::wstring(kind)+L"-"+mode,store);}
+                for(const auto scenario:{L"callback-frame-observer-normal",L"callback-frame-native-throw-normal"}){++cases;failures+=!child(executable,scenario,store);}
             }
         }
         std::cout<<cases<<" production presentation scenarios, "<<failures<<" failures\n";return failures?1:0;

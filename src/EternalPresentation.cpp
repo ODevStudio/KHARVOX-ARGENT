@@ -41,62 +41,63 @@ DossierOpen originalDossierOpen{};DossierClose originalDossierClose{};
 std::atomic<uintptr_t> dossierScreen{};
 void __fastcall dossierOpen(void* owner,void* event){
  originalDossierOpen(owner,event);dossierScreen=uintptr_t(owner);
- log("ETERNAL_DOSSIER event=open");
+ try{log("ETERNAL_DOSSIER event=open");}catch(...){}
 }
 void __fastcall dossierClose(void* owner){
  originalDossierClose(owner);auto expected=uintptr_t(owner);dossierScreen.compare_exchange_strong(expected,0);
- log("ETERNAL_DOSSIER event=close");
+ try{log("ETERNAL_DOSSIER event=close");}catch(...){}
 }
 std::mutex pauseMutex;
 PauseMenuSession pauseSession;
 template<class T> bool read(uintptr_t p,T& value){SIZE_T got{};return p&&ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(p),&value,sizeof(value),&got)&&got==sizeof(value);}
-void logPause(void* screen,int transition,const char* event){
+void logPause(void* screen,int transition,const char* event) noexcept {try{
  uintptr_t menu{};int active=-99,next=-99;
  if(read(uintptr_t(screen)+0xd8,menu)&&menu){read(menu+0x90,active);read(menu+0x94,next);}
  log(std::string("ETERNAL_PAUSE event=")+event+" transition="+std::to_string(transition)+" activeScreen="+std::to_string(active)+" nextScreen="+std::to_string(next));
+}catch(...){}
 }
 void __fastcall pauseShow(void* screen,int transition){
- {std::lock_guard<std::mutex> lock(pauseMutex);pauseSession.show(uintptr_t(screen));}
+ try{std::lock_guard<std::mutex> lock(pauseMutex);pauseSession.show(uintptr_t(screen));}catch(...){}
  originalPauseShow(screen,transition);
  logPause(screen,transition,"show");
 }
 void __fastcall pauseHide(void* screen,int transition){
  originalPauseHide(screen,transition);
- {std::lock_guard<std::mutex> lock(pauseMutex);pauseSession.hide(uintptr_t(screen),transition);}
+ try{std::lock_guard<std::mutex> lock(pauseMutex);pauseSession.hide(uintptr_t(screen),transition);}catch(...){}
  logPause(screen,transition,"hide");
 }
 void __fastcall upgradeShow(void* screen,int transition){
  upgradeScreen=uintptr_t(screen);
  originalUpgradeShow(screen,transition);
  upgradeAnimationOwner=player.load();
- log("ETERNAL_UPGRADE event=show transition="+std::to_string(transition));
+ try{log("ETERNAL_UPGRADE event=show transition="+std::to_string(transition));}catch(...){}
 }
 void __fastcall upgradeHide(void* screen,int transition){
  originalUpgradeHide(screen,transition);
  auto expected=uintptr_t(screen);upgradeScreen.compare_exchange_strong(expected,0);
- log("ETERNAL_UPGRADE event=hide transition="+std::to_string(transition));
+ try{log("ETERNAL_UPGRADE event=hide transition="+std::to_string(transition));}catch(...){}
 }
 void __fastcall deathShow(void* screen,int transition){
  originalDeathShow(screen,transition);
  deathScreen=uintptr_t(screen);
- log("ETERNAL_DEATH event=show transition="+std::to_string(transition));
+ try{log("ETERNAL_DEATH event=show transition="+std::to_string(transition));}catch(...){}
 }
 void __fastcall deathHide(void* screen,int transition){
  originalDeathHide(screen,transition);
  auto expected=uintptr_t(screen);deathScreen.compare_exchange_strong(expected,0);
- log("ETERNAL_DEATH event=hide transition="+std::to_string(transition));
+ try{log("ETERNAL_DEATH event=hide transition="+std::to_string(transition));}catch(...){}
 }
 void publishFrame(uintptr_t frame){
  if(!frame){
-  if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))log("ETERNAL_PRESENTATION_STORE frame pointer unavailable");}
+  if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))try{log("ETERNAL_PRESENTATION_STORE frame pointer unavailable");}catch(...){}}
   return;
  }
  Sample next;
  if(!decodeFrame([&](size_t offset,void* value,size_t size){SIZE_T got{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(frame+offset),value,size,&got)&&got==size;},GetTickCount64(),next)){
-  if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))log("ETERNAL_PRESENTATION_STORE frame decode failed");}
+  if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))try{log("ETERNAL_PRESENTATION_STORE frame decode failed");}catch(...){}}
   return;
  }
- if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))log("ETERNAL_PRESENTATION_STORE first-frame valid="+std::to_string(next.valid)+" inGame="+std::to_string(next.inGame)+" paused="+std::to_string(next.paused)+" cutscene="+std::to_string(next.cutscene));}
+ if(storeConsumer){static std::atomic<bool> reported{};if(!reported.exchange(true))try{log("ETERNAL_PRESENTATION_STORE first-frame valid="+std::to_string(next.valid)+" inGame="+std::to_string(next.inGame)+" paused="+std::to_string(next.paused)+" cutscene="+std::to_string(next.cutscene));}catch(...){}}
  if(!next.valid||!next.inGame){player=0;playerTick=0;upgradeScreen=0;dossierScreen=0;deathScreen=0;upgradeAnimationOwner=0;}
  {std::lock_guard<std::mutex> lock(pauseMutex);
   if(!next.valid||!next.inGame)pauseSession.reset();
@@ -110,7 +111,7 @@ void publishFrame(uintptr_t frame){
  refreshAnimationCamera();next.sync=syncAttack.load();
  if(extendedLogging()){
   static std::atomic<bool> lastDrone{};const bool active=droneAnimation.load();
-  if(lastDrone.exchange(active)!=active)log(std::string("ETERNAL_DRONE_ANIMATION active=")+(active?"1":"0")+" source=modChangeAnimPlaying");
+  if(lastDrone.exchange(active)!=active)try{log(std::string("ETERNAL_DRONE_ANIMATION active=")+(active?"1":"0")+" source=modChangeAnimPlaying");}catch(...){}
  }
  next.interaction=interactionAnimation.load();next.monkeyBar=monkeyBarAnimation.load();next.meatHook=meatHookAnimation.load();
  auto owner=player.load();uintptr_t table{};
@@ -123,13 +124,16 @@ void publishFrame(uintptr_t frame){
   if(read(owner+0x2fb70+0x5278,ledge))next.ledge=activeLedge(ledge);
  }
  {std::lock_guard<std::mutex> lock(mutex);latest=next;}
- if(extendedLogging()){static std::atomic<uint64_t> count{};const auto sequence=++count;if(sequence==1)log("ETERNAL_PRESENTATION_FRAME address="+std::to_string(frame));if(sequence==1||sequence%120==0)log("ETERNAL_PRESENTATION valid="+std::to_string(next.valid)+" inGame="+std::to_string(next.inGame)+" paused="+std::to_string(next.paused)+" deathMenu="+std::to_string(next.deathMenu)+" cutscene="+std::to_string(next.cutscene)+" sync="+std::to_string(next.sync)+" ledge="+std::to_string(next.ledge)+" interaction="+std::to_string(next.interaction)+" monkeyBar="+std::to_string(next.monkeyBar)+" meatHook="+std::to_string(next.meatHook));}
+ if(extendedLogging()){static std::atomic<uint64_t> count{};const auto sequence=++count;
+  if(sequence==1)try{log("ETERNAL_PRESENTATION_FRAME address="+std::to_string(frame));}catch(...){}
+  if(sequence==1||sequence%120==0)try{log("ETERNAL_PRESENTATION valid="+std::to_string(next.valid)+" inGame="+std::to_string(next.inGame)+" paused="+std::to_string(next.paused)+" deathMenu="+std::to_string(next.deathMenu)+" cutscene="+std::to_string(next.cutscene)+" sync="+std::to_string(next.sync)+" ledge="+std::to_string(next.ledge)+" interaction="+std::to_string(next.interaction)+" monkeyBar="+std::to_string(next.monkeyBar)+" meatHook="+std::to_string(next.meatHook));}catch(...){}
+ }
 }
 void __fastcall consumeFrame(void* viewBuilder){
  // 17e8740 consumes gameFrameReturn_t from this+2a50 when assembling the
  // render views. Producer 439a60 only SCHEDULES the job; returning from it
  // does not mean the frame is populated. Read at this actual consumer.
- uintptr_t frame{};if(read(uintptr_t(viewBuilder)+0x2a50,frame))publishFrame(frame);
+ try{uintptr_t frame{};if(read(uintptr_t(viewBuilder)+0x2a50,frame))publishFrame(frame);}catch(...){}
  original(viewBuilder);
 }
 
