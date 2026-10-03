@@ -63,7 +63,8 @@ Root-mask ownership across interleaved hands, root destruction and pointer reuse
 still needs native lifecycle evidence. The current fixture does not
 comprehensively execute attachment/rest-pose or precision-bolt branches.
 Native game/headset callbacks, broader context changes and DLL unload remain
-unverified. Controller state/rumble IAT ownership is the next audit target.
+unverified. Controller state/rumble setup is recorded in
+[the IAT ownership audit](XINPUT_IAT_OWNERSHIP_AUDIT.md); native coexistence remains pending.
 
 ## Persistent-State Follow-Up
 
