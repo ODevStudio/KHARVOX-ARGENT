@@ -9,6 +9,7 @@
 #include "HeadsetFov.h"
 #include "AnimationFovGuard.h"
 #include <unordered_map>
+#include <optional>
 #include "hud/EternalWeaponWheel.h"
 #include "hud/HudPlaceholder.h"
 #include "hud/EternalHitMarkers.h"
@@ -67,7 +68,7 @@ void synchronizeControlledActor(){
  physicsOwner=anchorOwner=0;physicsTick=0;follow={};yawFollow={};placedWorldHands={};
  history={};historyCursor=0;matchedSerial=0;matchedHands={};hudHandValid=false;hudTick=0;
  input::weaponApplied({});input::followStick({});input::headMovement(0);input::followTurn(0);
- log(std::string("ETERNAL_CONTROLLED_ACTOR mode=")+(next?"campaign-revenant":"slayer")+" camera=rebase");
+ try{log(std::string("ETERNAL_CONTROLLED_ACTOR mode=")+(next?"campaign-revenant":"slayer")+" camera=rebase");}catch(...){}
 }
 void applyCrouchHeight(std::array<float,3>& origin){
  // Eternal's pm_crouchviewheight default is 0.8763 metres. Keep controller and
@@ -82,14 +83,14 @@ Discover discover{};
 std::atomic<ULONGLONG> lastDiscovery{};
 void maintainRenderControls();
 int __fastcall pollController(void* object,int user){
- if(user==0)maintainRenderControls();
+ if(user==0)try{maintainRenderControls();}catch(...){}
  // Eternal's discovery thread only tries disconnected slots after its own
  // rescan flag is raised. VR becomes ready after that initial scan.
- if(user==0&&discover){
+ if(user==0&&discover)try{
   bool ready;{std::lock_guard<std::mutex> lock(input::stateMutex);ready=input::fresh(input::state,GetTickCount64());}
   auto last=lastDiscovery.load();const auto now=GetTickCount64();
   if(ready&&now-last>1000&&lastDiscovery.compare_exchange_strong(last,now))discover(object);
- }
+ }catch(...){}
  return originalPoll(object,user);
 }
 using CvarSetter=bool(__fastcall*)(void*,const char*,bool);
@@ -108,11 +109,12 @@ FinalizeCamera originalFinalizeCamera{};
 void __fastcall finalizeCamera(void* object){
  // Only touch a camera while the engine owns it in this callback. Never retain
  // a pointer for asynchronous restoration. Each camera has independent state.
- thread_local std::unordered_map<void*,AnimationFovGuard> guards;
+ thread_local std::optional<std::unordered_map<void*,AnimationFovGuard>> guards;
  auto* fov=reinterpret_cast<float*>(static_cast<unsigned char*>(object)+0xb8);
- auto previous=guards.find(object);
- if(previous!=guards.end()){previous->second.restore(fov[0],fov[1]);guards.erase(previous);}
+ if(guards){auto previous=guards->find(object);
+  if(previous!=guards->end()){previous->second.restore(fov[0],fov[1]);guards->erase(previous);}}
  originalFinalizeCamera(object);
+ try{
  bool protect;{
   std::lock_guard<std::mutex> lock(poseMutex);
   const auto now=GetTickCount64();
@@ -120,16 +122,21 @@ void __fastcall finalizeCamera(void* object){
  }
  if(!protect)return;
  float x,y;{std::lock_guard<std::mutex> lock(fovMutex);x=requiredFovX;y=requiredFovY;}
- AnimationFovGuard guard;
- if(guard.apply(fov[0],fov[1],x,y)){
-  guards.emplace(object,guard);
+ AnimationFovGuard guard;float protectedX=fov[0],protectedY=fov[1];
+ if(guard.apply(protectedX,protectedY,x,y)){
+  if(!guards)guards.emplace();
+  if(!guards->emplace(object,guard).second)return;
+  fov[0]=protectedX;fov[1]=protectedY;
   static std::atomic<uint64_t> count{};
   if(count.fetch_add(1)%600==0)log("ETERNAL_ANIMATION_FOV native="+std::to_string(guard.nativeX)+","+std::to_string(guard.nativeY)+" protected="+std::to_string(fov[0])+","+std::to_string(fov[1]));
  }
+ }catch(...){}
 }
 std::filesystem::path lightCullingTestMarker;
 void maintainRenderControls(){
- if(!setCvar)return;
+ thread_local bool busy{};
+ if(!setCvar||busy)return;
+ struct BusyReset {bool& value;~BusyReset(){value=false;}} reset{busy};busy=true;
  std::unique_lock<std::mutex> controlLock(controlMutex,std::try_to_lock);
  if(!controlLock.owns_lock())return;
  bool world;{std::lock_guard<std::mutex> lock(poseMutex);world=active;}
@@ -155,13 +162,12 @@ void maintainRenderControls(){
  const bool transition=world!=lightCulling.held;
  // Execute on an engine camera/input callback. Use its setter (allocation, locking,
  // numeric conversion and change notifications), never raw CVar value writes.
- thread_local bool busy=false;if(busy)return;busy=true;
 
  const bool bloomTransition=wheelShown!=wheelBloom.held;
  const bool bloomOk=wheelBloom.update(wheelShown,[&](int& value){return readRenderControl(cvarBase,wheelBloomControl,read,value);},[&](int value){
   const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(wheelBloomControl.rva)),text.c_str(),true);
  });
- if(bloomTransition||!bloomOk)log("ETERNAL_WHEEL_BLOOM visible="+std::to_string(wheelShown)+" success="+std::to_string(bloomOk)+" restore="+std::to_string(wheelBloom.restore));
+ if(bloomTransition||!bloomOk)try{log("ETERNAL_WHEEL_BLOOM visible="+std::to_string(wheelShown)+" success="+std::to_string(bloomOk)+" restore="+std::to_string(wheelBloom.restore));}catch(...){}
  // FSR owns AA while selected; otherwise preserve engine-selected DLSS.
  static const bool fsrActive=environmentFlag("ARGENT_FSR1");
  const RenderControl aaMode{0x6685ce0,"r_antialiasing","",0};
@@ -170,14 +176,14 @@ void maintainRenderControls(){
  if(aaReady&&desiredAa>=0){
   int before{},after{};bool accepted{};
   if(aaPolicy.apply(aaNow,desiredAa,[&](int& value){return readRenderControl(cvarBase,aaMode,read,value);},[&](int value){const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(aaMode.rva)),text.c_str(),true);},before,after,accepted))
-   log("ETERNAL_AA_ENFORCED before="+std::to_string(before)+" requested="+std::to_string(desiredAa)+" accepted="+std::to_string(accepted)+" after="+std::to_string(after)+" verified="+std::to_string(after==desiredAa)+" context="+presentation::name(aaContext));
+   try{log("ETERNAL_AA_ENFORCED before="+std::to_string(before)+" requested="+std::to_string(desiredAa)+" accepted="+std::to_string(accepted)+" after="+std::to_string(after)+" verified="+std::to_string(after==desiredAa)+" context="+presentation::name(aaContext));}catch(...){}
  }
 #ifndef ARGENT_CLEAN_RELEASE
  static FovComparison fovTest;static int lastFovPhase=-2;static uint64_t fovReport{};
  if(perf::enabled()&&!lightCullingTestMarker.empty()){
   auto request=lightCullingTestMarker.parent_path()/L"fov-compare.request";std::ifstream command(request);int value=-1;
   if(command>>value){command.close();std::error_code error;std::filesystem::remove(request,error);
-   if(!error&&(value==0||value==1)){fovTest.request(value==1);log("PERF_FOV_REQUEST start="+std::to_string(value));}
+   if(!error&&(value==0||value==1)){fovTest.request(value==1);try{log("PERF_FOV_REQUEST start="+std::to_string(value));}catch(...){}}
   }
  }
 #endif
@@ -187,7 +193,7 @@ void maintainRenderControls(){
    if(!calibratedFov){calibratedFov=actual;calibratedFovX=observedFovX;calibratedFovY=observedFovY;}
    const int next=engineFov(requiredFovX,requiredFovY,calibratedFovX,calibratedFovY,calibratedFov);
    if(next&&std::abs(next-automaticFov)>=2){automaticFov=next;fovChanged=aaNow;
-    log("HEADSET_FOV engine="+std::to_string(next)+" requiredTanX="+std::to_string(requiredFovX)+" requiredTanY="+std::to_string(requiredFovY)+" observedTanX="+std::to_string(observedFovX)+" observedTanY="+std::to_string(observedFovY));}
+    try{log("HEADSET_FOV engine="+std::to_string(next)+" requiredTanX="+std::to_string(requiredFovX)+" requiredTanY="+std::to_string(requiredFovY)+" observedTanX="+std::to_string(observedFovX)+" observedTanY="+std::to_string(observedFovY));}catch(...){}}
   }
 #ifdef ARGENT_CLEAN_RELEASE
   selectedFov=automaticFov;
@@ -197,7 +203,7 @@ void maintainRenderControls(){
 #endif
  }
  enforceRenderControls(cvarBase,read,setCvar,[](const RenderControl& c,bool accepted,int before,bool verified,int after){
-  log("ETERNAL_CONTROL name="+std::string(c.name)+" requested="+c.value+" before="+std::to_string(before)+" accepted="+std::to_string(accepted)+" verified="+std::to_string(verified)+" after="+std::to_string(after));
+  try{log("ETERNAL_CONTROL name="+std::string(c.name)+" requested="+c.value+" before="+std::to_string(before)+" accepted="+std::to_string(accepted)+" verified="+std::to_string(verified)+" after="+std::to_string(after));}catch(...){}
  },selectedFov);
 #ifndef ARGENT_CLEAN_RELEASE
  int actualFov{};const bool fovKnown=readRenderControl(cvarBase,renderControls[0],read,actualFov);
@@ -205,7 +211,7 @@ void maintainRenderControls(){
  if(perf::enabled()&&(lastFovPhase!=fovTest.phase||aaNow-fovReport>=1000)){
   int actual{};const bool known=readRenderControl(cvarBase,renderControls[0],read,actual);
   std::lock_guard<std::mutex> lock(fovMutex);
-  log("PERF_FOV_STATE serial="+std::to_string(perf::frame.load())+" phase="+std::to_string(fovTest.phase)+" pending="+std::to_string(fovTest.pending)+" automatic="+std::to_string(automaticFov)+" requested="+std::to_string(selectedFov)+" actual="+(known?std::to_string(actual):"unknown")+" verified="+std::to_string(known&&actual==selectedFov)+" tanX="+std::to_string(observedFovX)+" tanY="+std::to_string(observedFovY)+" ageMs="+std::to_string(aaNow>=observedFovTick?aaNow-observedFovTick:0)+" context="+presentation::name(aaContext));
+  try{log("PERF_FOV_STATE serial="+std::to_string(perf::frame.load())+" phase="+std::to_string(fovTest.phase)+" pending="+std::to_string(fovTest.pending)+" automatic="+std::to_string(automaticFov)+" requested="+std::to_string(selectedFov)+" actual="+(known?std::to_string(actual):"unknown")+" verified="+std::to_string(known&&actual==selectedFov)+" tanX="+std::to_string(observedFovX)+" tanY="+std::to_string(observedFovY)+" ageMs="+std::to_string(aaNow>=observedFovTick?aaNow-observedFovTick:0)+" context="+presentation::name(aaContext));}catch(...){}
   lastFovPhase=fovTest.phase;fovReport=aaNow;
  }
 #endif
@@ -220,26 +226,25 @@ void maintainRenderControls(){
   int safe{},blur{};
   const bool safeKnown=readRenderControl(cvarBase,RenderControl{0x66de720,"r_TAASafeMode","",0},read,safe);
   const bool blurKnown=readRenderControl(cvarBase,RenderControl{0x66deb80,"r_motionblur","",0},read,blur);
-  log("ETERNAL_TEMPORAL_STATE aa="+std::to_string(aa)+" taaSafeMode="+(safeKnown?std::to_string(safe):"unknown")+
-      " motionBlur="+(blurKnown?std::to_string(blur):"unknown")+" requestedAa="+std::to_string(desiredAa)+" verified="+std::to_string(desiredAa<0||aa==desiredAa)+" nativeTaaBlocked=1 dlssSelected="+std::to_string(aa==2)+" readOnly=1");
+  try{log("ETERNAL_TEMPORAL_STATE aa="+std::to_string(aa)+" taaSafeMode="+(safeKnown?std::to_string(safe):"unknown")+
+      " motionBlur="+(blurKnown?std::to_string(blur):"unknown")+" requestedAa="+std::to_string(desiredAa)+" verified="+std::to_string(desiredAa<0||aa==desiredAa)+" nativeTaaBlocked=1 dlssSelected="+std::to_string(aa==2)+" readOnly=1");}catch(...){}
   lastLoggedAa=aa;lastAaReport=aaNow;
  }
  static int scaleOwner=-1;
- if(scaleOwner!=int(dlssOwnsScale)){log(std::string("ETERNAL_SCALE owner=")+(dlssOwnsScale?"DLSS":"launcher"));scaleOwner=int(dlssOwnsScale);}
+ if(scaleOwner!=int(dlssOwnsScale)){try{log(std::string("ETERNAL_SCALE owner=")+(dlssOwnsScale?"DLSS":"launcher"));}catch(...){}scaleOwner=int(dlssOwnsScale);}
  static bool scaleReported=false;
  if(!dlssOwnsScale)for(const auto& c:scales){int value{};float fraction{};const bool known=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);
   const bool same=known&&(c.floating?std::abs(fraction-renderScale)<.0001f:value==c.integer);
   if(known&&!same)setCvar(reinterpret_cast<void*>(cvarBase+build::rva(c.rva)),c.value,true);
-  if(!scaleReported||!same){const bool verified=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);log("ETERNAL_SCALE name="+std::string(c.name)+" requested="+c.value+" read="+std::to_string(verified)+" value="+std::to_string(c.floating?fraction:float(value)));}
+  if(!scaleReported||!same){const bool verified=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);try{log("ETERNAL_SCALE name="+std::string(c.name)+" requested="+c.value+" read="+std::to_string(verified)+" value="+std::to_string(c.floating?fraction:float(value)));}catch(...){}}
  }
  scaleReported=true;
  const bool ok=lightCulling.update(world,[&](int& value){return readRenderControl(cvarBase,lightCullingControl,read,value);},[&](int value){
   const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(lightCullingControl.rva)),text.c_str(),false);
  });
  if(transition||!ok){int value{};const bool verified=readRenderControl(cvarBase,lightCullingControl,read,value);
-  log("ETERNAL_LIGHT_CULL world="+std::to_string(world)+" success="+std::to_string(ok)+" verified="+std::to_string(verified)+" value="+std::to_string(value)+" restore="+std::to_string(lightCulling.restore));
+  try{log("ETERNAL_LIGHT_CULL world="+std::to_string(world)+" success="+std::to_string(ok)+" verified="+std::to_string(verified)+" value="+std::to_string(value)+" restore="+std::to_string(lightCulling.restore));}catch(...){}
  }
- busy=false;
 }
 constexpr unsigned char signature[]={0xf2,0x0f,0x10,0x02,0xf2,0x0f,0x11,0x81,0x24,0x01,0x00,0x00,0x8b,0x42,0x08,0x89,0x81,0x2c,0x01,0x00,0x00,0x41,0x0f,0x10,0x00,0x0f,0x11,0x81,0x30,0x01,0x00,0x00,0x41,0x0f,0x10,0x48,0x10,0x0f,0x11,0x89,0x40,0x01,0x00,0x00,0x41,0x8b,0x40,0x20,0x89,0x81,0x50,0x01,0x00,0x00,0xc3};
 bool probeStoreImage(){
@@ -277,7 +282,7 @@ bool approvedImage(){
  return ok&&!std::memcmp(digest,expected,32);
 }
 void __fastcall cameraSetter(void* object,const float* position,const float* basis){
- maintainRenderControls();
+ try{maintainRenderControls();}catch(...){}
  const bool authored=presentation::refreshAnimationCamera();
  // Monkey bars retain native physics/launch velocity, but do not borrow the
  // authored first-person camera joint. Keep the normal upright VR view.
@@ -299,7 +304,7 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
       animationReference=yawFollow.reference(reference);animationActive=true;
       anchorOwner=0;follow.previousValid=false;follow.commanded=false;yawFollow.command=0;
       input::followStick({});input::followTurn(0);
-      log("ETERNAL_KILL_CAMERA active=1 position=native-animation rotation=held-body-plus-head translation=off");
+      try{log("ETERNAL_KILL_CAMERA active=1 position=native-animation rotation=held-body-plus-head translation=off");}catch(...){}
      }
      // KHARVOX animation-camera contract: native authored position, a level
      // gameplay basis held at entry, free HMD look, no physical translation.
@@ -309,7 +314,7 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
     if(animationActive){
      animationActive=false;anchorOwner=0;needPositionReference=true;follow={};
      yawFollow.previousValid=false;yawFollow.command=0;
-     log("ETERNAL_KILL_CAMERA active=0 anchor=rebase");
+     try{log("ETERNAL_KILL_CAMERA active=0 anchor=rebase");}catch(...){}
     }
     if(horizontal>.05f&&(!viewActor||!bodyValid)){
      // Native Revenant yaw already includes our absolute HMD direction. Keep
@@ -540,7 +545,7 @@ void updatePose(XrPosef head,bool world,bool recenter,bool positionTracked) noex
  // unintended climb-stick command. HMD and managed visual turning remain free.
  input::headMovement(gameplay&&!viewActor&&!climbing?moveDirection:0);
  input::followTurn(yawFollow.request(movementYaw,(!controls.snapTurn&&!controls.managedTurn&&std::abs(int(controls.pad.sThumbRX))>4915)||(controls.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER),!viewActor&&!climbing&&gameplay&&active&&!needReference&&bodyValid&&GetTickCount64()-physicsTick<100&&input::fresh(controls,GetTickCount64())));
- static unsigned bodyReport{};if(extendedLogging()&&++bodyReport%300==0)log("ETERNAL_BODY_YAW accepted="+std::to_string(yawFollow.accepted)+" residual="+std::to_string(movementYaw)+" command="+std::to_string(yawFollow.command));
+ static unsigned bodyReport{};if(extendedLogging()&&++bodyReport%300==0)try{log("ETERNAL_BODY_YAW accepted="+std::to_string(yawFollow.accepted)+" residual="+std::to_string(movementYaw)+" command="+std::to_string(yawFollow.command));}catch(...){}
  const bool ready=!climbing&&gameplay&&active&&translate&&!needReference&&!needPositionReference&&bodyValid&&GetTickCount64()-physicsTick<100&&input::fresh(controls,GetTickCount64())&&(!viewActor||controls.revenantActor==viewActor);
  const bool manual=std::abs(int(controls.pad.sThumbLX))>4915||std::abs(int(controls.pad.sThumbLY))>4915;
  auto room=follow.update(physicsOwner,physicsPosition,head.position,referencePosition,bodyBasis,yawFollow.reference(reference),unitsPerMeter(),manual,ready);
