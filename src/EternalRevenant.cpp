@@ -33,7 +33,7 @@ void __fastcall think(void* object,const void* previous,const void* current){
  XrVector3f foot{};float delta[3]{};std::array<uint64_t,5> bindings{};
  if(!read(demon+0x58e8+0xb0,&foot,sizeof(foot))||!camera::validPosition(foot)||
     !read(uintptr_t(current),command.data(),command.size())||
-    !read(demon+0x37490,bindings.data(),sizeof(bindings))){original(object,previous,current);return;}
+    !read(demon+0x37490,bindings.data(),sizeof(bindings))){commandActor=0;previousActions=0;original(object,previous,current);return;}
  camera::publishPhysics(demon,foot);
  uint16_t angles[3]{};float desired[3]{};
  if(!camera::revenantAim(demon,aim.data())||!viewAngles(aim.data(),desired)){commandActor=0;previousActions=0;original(object,previous,current);return;}
@@ -62,7 +62,7 @@ void __fastcall think(void* object,const void* previous,const void* current){
  // aim through the native setter before those attacks, including pitch.
  setBasis(object,aim.data());
  original(object,oldCommand.data(),command.data());
- if(extendedLogging()){static unsigned count{};if(++count%300==1)log("ETERNAL_REVENANT input=1 aim=HMD physics=demon forwardZ="+std::to_string(aim[2]));}
+ if(extendedLogging()){static std::atomic<unsigned> count{};if(++count%300==1)try{log("ETERNAL_REVENANT input=1 aim=HMD physics=demon forwardZ="+std::to_string(aim[2]));}catch(...){}}
 }
 }
 #ifdef ARGENT_REVENANT_TESTING
