@@ -12,3 +12,6 @@ target_compile_definitions(dlss_hook_clean_tests PRIVATE ARGENT_CLEAN_RELEASE WI
 target_include_directories(dlss_hook_clean_tests PRIVATE third-party/minhook/include third-party/openxr-sdk/include third-party/vulkan-headers/include)
 add_test(NAME dlss_hook_clean COMMAND dlss_hook_clean_tests)
 set_tests_properties(dlss_hook_clean PROPERTIES TIMEOUT 120)
+add_executable(eternal_haptics_weapon_tests tests/eternal_haptics_weapon_tests.cpp)
+target_compile_features(eternal_haptics_weapon_tests PRIVATE cxx_std_17)
+add_test(NAME eternal_haptics_weapon COMMAND eternal_haptics_weapon_tests)

@@ -1,6 +1,6 @@
 #pragma once
 #include "LegacyHapticsWeaponKind.h"
-#include <string>
+#include <array>
 #include <string_view>
 namespace argent {
 inline const char* eternalCalibrationProfile(KharvoxWeaponKind kind,bool crucible=false,bool sentinelHammer=false){
@@ -20,9 +20,25 @@ inline const char* eternalCalibrationProfile(KharvoxWeaponKind kind,bool crucibl
  default:return "default";
  }
 }
-inline KharvoxWeaponKind eternalHapticsWeapon(std::string_view name){
- std::string key;for(unsigned char c:name)if(c!='_'&&c!='-'&&c!=' ')key+=char(c>='A'&&c<='Z'?c+32:c);
- const auto has=[&](const char* part){return key.find(part)!=std::string::npos;};
+inline bool normalizedWeaponNameContains(std::string_view name,std::string_view part) noexcept {
+ if(part.empty())return true;
+ for(size_t start=0;start<name.size();++start){
+  if(name[start]=='_'||name[start]=='-'||name[start]==' ')continue;
+  size_t matched{};
+  for(size_t i=start;i<name.size();++i){
+   const auto c=static_cast<unsigned char>(name[i]);if(c=='_'||c=='-'||c==' ')continue;
+   if(char(c>='A'&&c<='Z'?c+32:c)!=part[matched])break;
+   if(++matched==part.size())return true;
+  }
+ }
+ return false;
+}
+inline KharvoxWeaponKind eternalHapticsWeapon(std::string_view name) noexcept {
+ std::array<char,256> key;
+ size_t length{};
+ if(name.size()<=key.size())for(unsigned char c:name)if(c!='_'&&c!='-'&&c!=' ')key[length++]=char(c>='A'&&c<='Z'?c+32:c);
+ const std::string_view normalized(key.data(),length);
+ const auto has=[&](std::string_view part){return name.size()<=key.size()?normalized.find(part)!=std::string_view::npos:normalizedWeaponNameContains(name,part);};
  if(has("supershotgun")||has("doublebarrel"))return KharvoxWeaponKind::SuperShotgun;
  if(has("shotgun"))return KharvoxWeaponKind::Shotgun;
  if(has("heavycannon")||has("heavyassaultrifle"))return KharvoxWeaponKind::HeavyAssaultRifle;
