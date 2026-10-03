@@ -67,6 +67,7 @@ std::mutex crucibleEventsGuard;
 std::map<uintptr_t,CrucibleEvents> crucibleEvents;
 template<int Kind> uintptr_t __fastcall crucibleEvent(void* hands,uintptr_t a,uintptr_t b,uintptr_t c,uintptr_t d,uintptr_t e){
  const auto result=originalCrucibleEvents[Kind](hands,a,b,c,d,e);
+ try{
  std::lock_guard<std::mutex> lock(crucibleEventsGuard);
  if(crucibleEvents.size()>32)crucibleEvents.clear();
  auto& events=crucibleEvents[uintptr_t(hands)];
@@ -74,6 +75,7 @@ template<int Kind> uintptr_t __fastcall crucibleEvent(void* hands,uintptr_t a,ui
  if constexpr(Kind==2)events.value.end=serial;
  else {events.value.begin=serial;events.value.tick=GetTickCount64();}
  if(extendedLogging())log("ETERNAL_CRUCIBLE nativeSwingEvent="+std::to_string(Kind)+" serial="+std::to_string(serial));
+ }catch(...){}
  return result;
 }
 using ZoomBlend=void(__fastcall*)(void*,float);
@@ -102,11 +104,13 @@ void __fastcall waterMove(void* object,void* context){
   read(address+0x4668,gravity,sizeof(gravity))&&std::abs(gravity[0])<.01f&&std::abs(gravity[1])<.01f&&std::abs(gravity[2]+1.f)<.01f&&
   swimmingBasis(saved+3,head.data(),replacement,replacement+3);
  if(!use){originalWaterMove(object,context);return;}
- std::memcpy(reinterpret_cast<void*>(address+0x469c),replacement,sizeof(replacement));
- originalWaterMove(object,context);
- std::memcpy(reinterpret_cast<void*>(address+0x469c),saved,sizeof(saved));
+ {
+  struct RestoreBasis {void* target;const float* previous;~RestoreBasis(){std::memcpy(target,previous,6*sizeof(float));}} restore{reinterpret_cast<void*>(address+0x469c),saved};
+  std::memcpy(restore.target,replacement,sizeof(replacement));
+  originalWaterMove(object,context);
+ }
  static std::atomic<uint64_t> updates{};
- if(extendedLogging()&&updates.fetch_add(1)%120==0)log("ETERNAL_SWIMMING active=1 headZ="+std::to_string(head[2])+" forwardZ="+std::to_string(replacement[2])+" rightZ="+std::to_string(replacement[5])+" restore=1");
+ if(extendedLogging()&&updates.fetch_add(1)%120==0)try{log("ETERNAL_SWIMMING active=1 headZ="+std::to_string(head[2])+" forwardZ="+std::to_string(replacement[2])+" rightZ="+std::to_string(replacement[5])+" restore=1");}catch(...){}
 }
 struct WallHeading {uintptr_t mechanic{};ULONGLONG tick{};camera::Basis head{};};
 thread_local WallHeading wallHeading;
@@ -152,9 +156,10 @@ WeaponIdentity readWeaponIdentity(void* hands){
 void updateHapticWeapon(void* hands){
  const auto identity=readWeaponIdentity(hands);const auto kind=identity.kind;const auto crucible=identity.crucible;const auto& text=identity.name;
  calibrationWeaponProfile=identity.profile;
- if(crucibleHeld.exchange(crucible)!=crucible)log("ETERNAL_CRUCIBLE equipped="+std::to_string(crucible));
+ const auto previousCrucible=crucibleHeld.exchange(crucible);
  const auto previous=hapticKind.exchange(kind);hapticTick=GetTickCount64();
- if(previous!=kind&&extendedLogging())log("ETERNAL_HAPTIC_WEAPON kind="+std::to_string(int(kind))+" decl="+text);
+ if(previousCrucible!=crucible)try{log("ETERNAL_CRUCIBLE equipped="+std::to_string(crucible));}catch(...){}
+ if(previous!=kind&&extendedLogging())try{log("ETERNAL_HAPTIC_WEAPON kind="+std::to_string(int(kind))+" decl="+text);}catch(...){}
 }
 // The only skipped call is GorillaBar entry at 0x1397c2c. The native
 // completion query (0xb420e0) treats handle 0xffff as completed and advances
@@ -169,7 +174,7 @@ bool __fastcall playTraversal(void* player,void* entity,unsigned short* handle,b
   *handle=0xffff;
   presentation::skippedMonkeyBarOwner=owner;
   monkey::acceptedBar(owner);
-  if(extendedLogging())log("ETERNAL_MONKEYBAR firstPersonAnimation=skipped completionHandle=65535");
+  if(extendedLogging())try{log("ETERNAL_MONKEYBAR firstPersonAnimation=skipped completionHandle=65535");}catch(...){}
   return true;
  }
  return originalPlayTraversal(player,entity,handle,loop,anim,transform,rate);
@@ -180,7 +185,7 @@ void __fastcall endBar(void* mechanic){
  if(uintptr_t(mechanic)==owner+0x36e48){
   auto expected=owner;
   if(presentation::skippedMonkeyBarOwner.compare_exchange_strong(expected,0)&&extendedLogging())
-   log("ETERNAL_MONKEYBAR nativeExit=1");
+   try{log("ETERNAL_MONKEYBAR nativeExit=1");}catch(...){}
  }
 }
 void __fastcall hideItem(void* item){
@@ -190,7 +195,7 @@ void __fastcall hideItem(void* item){
     keepMeleeWeaponVisible(presentation::gameplayInput.load(),presentation::refreshSyncAttack(),
        presentation::scriptedMovement.load(),fresh,hands,uintptr_t(item),meleeType)){
   if(extendedLogging()){static std::atomic<unsigned> reports{};if(reports.fetch_add(1)<32)
-   log("ETERNAL_MELEE weaponVisible=1 type="+std::to_string(meleeType)+" caller="+std::to_string(reinterpret_cast<uintptr_t>(_ReturnAddress())-uintptr_t(image)));}
+   try{log("ETERNAL_MELEE weaponVisible=1 type="+std::to_string(meleeType)+" caller="+std::to_string(reinterpret_cast<uintptr_t>(_ReturnAddress())-uintptr_t(image)));}catch(...){} }
   return;
  }
  originalHideItem(item);
@@ -219,7 +224,7 @@ float __fastcall zoomFov(void* weapon){
  if(!camera::readRenderControl(uintptr_t(image),camera::renderControls[0],read,integer,&gameplay))return native;
  const float result=vrWeaponWorldFov(native,gameplay,true);
  if(extendedLogging()&&result!=native){static std::atomic<unsigned> reports{};if(reports.fetch_add(1)<16)
-  log("ETERNAL_ALT_FIRE worldFovNative="+std::to_string(native)+" worldFovVR="+std::to_string(result));}
+  try{log("ETERNAL_ALT_FIRE worldFovNative="+std::to_string(native)+" worldFovVR="+std::to_string(result));}catch(...){} }
  return result;
 }
 // Same presentation-only policy as KHARVOX's patchVrSniperPresentation.
@@ -356,7 +361,7 @@ void rootVisibility(void* hands,void* root,bool hide){
  // The animation-event receiver at +2a28 is not this UpdatePosition owner.
  if(!model||ptr(model)<uintptr_t(image)||ptr(model)>=uintptr_t(image)+0x5000000)return;
  int surfaceCount{};const bool countRead=read(ptr(model+0x4d8)+0x80,&surfaceCount,sizeof(surfaceCount));
- static unsigned visibilityReport{};if(extendedLogging()&&hide&&visibilityReport++%600==0)log("ETERNAL_ARMS currentRoot=1 surfaces="+std::to_string(surfaceCount)+" readable="+std::to_string(countRead));
+ static unsigned visibilityReport{};if(extendedLogging()&&hide&&visibilityReport++%600==0)try{log("ETERNAL_ARMS currentRoot=1 surfaces="+std::to_string(surfaceCount)+" readable="+std::to_string(countRead));}catch(...){}
  // Match KHARVOX: clear every bit of the native 64-bit mesh mask.
  // Material/surface counts are not the visibility-mask capacity.
  surfaceCount=64;
@@ -393,7 +398,7 @@ bool __fastcall itemTransform(void* item,void* hands,float* origin,float* axis){
  // independent joint path. Override the successful native source instead.
  if(applyEquipmentDirection(slot,equipmentHead(ptr(uintptr_t(hands)+0x358),slot,head),head,axis)){
   static std::atomic<unsigned> reported{};const unsigned bit=1u<<slot;
-  if(!(reported.fetch_or(bit)&bit))log("ETERNAL_EQUIPMENT_TRANSFORM slot="+std::to_string(slot)+" source=HMD yawPitchRoll=1 origin=native");
+  if(!(reported.fetch_or(bit)&bit))try{log("ETERNAL_EQUIPMENT_TRANSFORM slot="+std::to_string(slot)+" source=HMD yawPitchRoll=1 origin=native");}catch(...){}
  }
  return valid;
 }
@@ -405,7 +410,7 @@ void __fastcall throwItem(void* item,void* owner,void* entity,float force,void* 
  originalThrowItem(item,owner,entity,force,extra,origin,use?selected.data():axis);
  if(use){
   static std::atomic<unsigned> reported{};const unsigned bit=1u<<slot;
-  if(!(reported.fetch_or(bit)&bit))log("ETERNAL_EQUIPMENT_THROW slot="+std::to_string(slot)+" source=HMD forwardZ="+std::to_string(selected[2])+" originForce=native");
+  if(!(reported.fetch_or(bit)&bit))try{log("ETERNAL_EQUIPMENT_THROW slot="+std::to_string(slot)+" source=HMD forwardZ="+std::to_string(selected[2])+" originForce=native");}catch(...){}
  }
 }
 void __fastcall fire(void* hands,void* weapon,void* info,void* muzzleOrigin,void* muzzleAxis,float* origin,float* axis){
@@ -432,7 +437,7 @@ void __fastcall fire(void* hands,void* weapon,void* info,void* muzzleOrigin,void
  if(source!=AimSource::Native)++aimUpdates;
  if(source==AimSource::Head){
   static std::atomic<unsigned> reported{};const unsigned bit=1u<<slot;
-  if(!(reported.fetch_or(bit)&bit))log("ETERNAL_EQUIPMENT_AIM slot="+std::to_string(slot)+" source=HMD origins=native");
+  if(!(reported.fetch_or(bit)&bit))try{log("ETERNAL_EQUIPMENT_AIM slot="+std::to_string(slot)+" source=HMD origins=native");}catch(...){}
  }
 }
 uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint,float* origin,float* axis){
@@ -456,7 +461,7 @@ uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint
   if(camera::controllerPlacement(sample.weaponBase,fromPosition,fromAxis)&&
      camera::controllerPlacement(sample.weapon,toPosition,toAxis)){
    const bool applied=calibrateWeaponAttachment(fromPosition,fromAxis,toPosition,toAxis,origin,axis);
-   if(applied&&extendedLogging()){static uint64_t last{};if(now-last>=1000){last=now;log("ETERNAL_WEAPON_CALIBRATION target="+std::string(identity.profile)+" attachmentOnly=1 sharedRoot=baseline");}}
+   if(applied&&extendedLogging()){static thread_local uint64_t last{};if(now-last>=1000){last=now;try{log("ETERNAL_WEAPON_CALIBRATION target="+std::string(identity.profile)+" attachmentOnly=1 sharedRoot=baseline");}catch(...){} }}
   }
  }
  std::lock_guard<std::mutex> lock(crucibleVisualGuard);
@@ -490,19 +495,19 @@ uintptr_t __fastcall attachmentJoint(void* model,void* root,int mode,void* joint
  if(replace){
   visual.pose.apply(hand,desired,origin,axis);
   if(extendedLogging()){static uint64_t last{};if(now-last>500){last=now;
-   log("ETERNAL_CRUCIBLE restAttachment=1 state="+std::to_string(state)+" source=velocity nativeEvents=preserved profile="+std::string(identity.profile));}}
+   try{log("ETERNAL_CRUCIBLE restAttachment=1 state="+std::to_string(state)+" source=velocity nativeEvents=preserved profile="+std::string(identity.profile));}catch(...){} }}
  }else if(eligible&&visual.pose.canCapture(now)){
   const bool had=visual.pose.cached;
-  if(visual.pose.capture(hand,desired,origin,axis)&&!had&&extendedLogging())log("ETERNAL_CRUCIBLE restCaptured=1 animState="+std::to_string(state));
+  if(visual.pose.capture(hand,desired,origin,axis)&&!had&&extendedLogging())try{log("ETERNAL_CRUCIBLE restCaptured=1 animState="+std::to_string(state));}catch(...){}
  }
  if((identity.crucible||identity.hammer)&&extendedLogging()){
   static uint64_t last{};
-  if(now-last>=500){last=now;log("ETERNAL_CRUCIBLE poseCheck eligible="+std::to_string(eligible)+" cached="+std::to_string(visual.pose.cached)+
+  if(now-last>=500){last=now;try{log("ETERNAL_CRUCIBLE poseCheck eligible="+std::to_string(eligible)+" cached="+std::to_string(visual.pose.cached)+
    " applied="+std::to_string(replace)+" animState="+std::to_string(state)+" pendingAction="+std::to_string(pendingAction)+
    " begin="+std::to_string(events.begin)+" end="+std::to_string(events.end)+" hit="+std::to_string(hit)+" manual="+std::to_string(controls.manualWeaponTrigger)+
    " gameplay="+std::to_string(presentation::gameplayInput.load())+" context="+std::to_string(context)+
    " inputFresh="+std::to_string(input::fresh(controls,now))+" poseFresh="+std::to_string(input::fresh(sample,now))+
-   " poseValid="+std::to_string(sample.weaponValid)+" placedAge="+std::to_string(now-placementTick));}
+   " poseValid="+std::to_string(sample.weaponValid)+" placedAge="+std::to_string(now-placementTick));}catch(...){} }
  }
  return result;
 }
@@ -522,15 +527,16 @@ void publishAnimatedLaser(void* item,void* hands){
  const bool found=eligible&&laserMuzzle(uintptr_t(hands),origin,axis);
  camera::publishLaser(found?origin:nullptr,found?axis:nullptr,identity.profile);
  if(eligible&&extendedLogging()){
-  static uint64_t last{};if(now-last>=2000){last=now;
-   log("ETERNAL_LASER phase=after-item-animation nativeMuzzle="+std::to_string(found)+" profile="+identity.profile);}
+  static thread_local uint64_t last{};if(now-last>=2000){last=now;
+   try{log("ETERNAL_LASER phase=after-item-animation nativeMuzzle="+std::to_string(found)+" profile="+identity.profile);}catch(...){} }
  }
 }
 void __fastcall updateItemAnimation(void* item,void* hands){
- const auto previousItem=animationItem,previousHands=animationHands;
- animationItem=uintptr_t(item);animationHands=uintptr_t(hands);
- originalItemAnimation(item,hands);
- animationItem=previousItem;animationHands=previousHands;
+ {
+  struct RestoreAnimation {const uintptr_t item,hands;~RestoreAnimation(){animationItem=item;animationHands=hands;}} restore{animationItem,animationHands};
+  animationItem=uintptr_t(item);animationHands=uintptr_t(hands);
+  originalItemAnimation(item,hands);
+ }
  publishAnimatedLaser(item,hands);
  // Publish only after native attachment AND skeletal animation have finished.
  // Native Render::Show queues the entity in its render world's update bitset.
@@ -542,7 +548,7 @@ void __fastcall updateItemAnimation(void* item,void* hands){
  if(root){
   reinterpret_cast<HideItem>(image+build::rva(0x18dbf20))(reinterpret_cast<void*>(root));
   if(extendedLogging()){static std::atomic<unsigned> reports{};if(reports.fetch_add(1)<16)
-   log("ETERNAL_PRECISION_BOLT renderPublish=1 phase=after-item-animation");}
+   try{log("ETERNAL_PRECISION_BOLT renderPublish=1 phase=after-item-animation");}catch(...){} }
  }
 }
 void __fastcall updateHands(void* hands){
@@ -572,20 +578,22 @@ void __fastcall updateHands(void* hands){
    rootVisibility(hands,reinterpret_cast<void*>(animationRoot),true);
    reinterpret_cast<HideItem>(image+build::rva(0x18dbf20))(reinterpret_cast<void*>(animationRoot));
    if(extendedLogging()){static std::atomic<unsigned> reports{};if(reports.fetch_add(1)<16)
-    log("ETERNAL_PRECISION_BOLT animationParentShow=1 armMeshes=masked");}
+    try{log("ETERNAL_PRECISION_BOLT animationParentShow=1 armMeshes=masked");}catch(...){} }
   }
   const auto item=uintptr_t(hands)+0x29b0;unsigned char itemHidden{},rootFlags{};
   const auto root=ptr(item+0x78);
   if(root&&read(item+0x54,&itemHidden,1)&&read(root+0xb0,&rootFlags,1)&&(itemHidden||(rootFlags&1))){
    reinterpret_cast<HideItem>(image+build::rva(0x138a0e0))(reinterpret_cast<void*>(item));
    if(extendedLogging()){static std::atomic<unsigned> reports{};if(reports.fetch_add(1)<16)
-    log("ETERNAL_PRECISION_BOLT nativeShow=1 phase=before-position freshController=1");}
+    try{log("ETERNAL_PRECISION_BOLT nativeShow=1 phase=before-position freshController=1");}catch(...){} }
   }
  }
- finalVisibilityCount=0;collectingVisibility=true;
- originalUpdateHands(hands);
+ finalVisibilityCount=0;
+ {
+  struct RestoreCollection {const bool previous;~RestoreCollection(){collectingVisibility=previous;}} restore{collectingVisibility};
+  collectingVisibility=true;originalUpdateHands(hands);
+ }
  updateHapticWeapon(hands);
- collectingVisibility=false;
  // UpdatePosition can change mesh visibility after the transform callback.
  // Enforce the handoff mask once native updates have finished.
  // Native UpdatePosition can finish the animation AFTER our first state read
@@ -625,7 +633,7 @@ void __fastcall updateHands(void* hands){
   rootVisibility(hands,reinterpret_cast<void*>(ptr(uintptr_t(hands)+offset+0x78)),hideItems||hideVisual);
   if(hideVisual&&extendedLogging()){
    static std::atomic<unsigned> reported{};const unsigned bit=1u<<slot;
-   if(!(reported.fetch_or(bit)&bit))log("ETERNAL_EQUIPMENT_VISUAL slot="+std::to_string(slot)+" mesh=hidden projectileEffects=native");
+   if(!(reported.fetch_or(bit)&bit))try{log("ETERNAL_EQUIPMENT_VISUAL slot="+std::to_string(slot)+" mesh=hidden projectileEffects=native");}catch(...){}
   }
  }
  // Source belongs to this camera-history frame, never a later XR action poll.
@@ -637,12 +645,12 @@ void __fastcall updateHands(void* hands){
  const bool laserFound=laserReady&&laserMuzzle(uintptr_t(hands),laserOrigin,laserAxis);
  camera::publishLaser(laserFound?laserOrigin:nullptr,laserFound?laserAxis:nullptr,laserProfile);
  if(laserReady&&extendedLogging()){
-  static uint64_t last{};const auto now=GetTickCount64();if(now-last>2000){last=now;
-   log("ETERNAL_LASER nativeMuzzle="+std::to_string(laserFound)+" profile="+laserProfile+" cameraHistory=1");}
+  static thread_local uint64_t last{};const auto now=GetTickCount64();if(now-last>2000){last=now;
+   try{log("ETERNAL_LASER nativeMuzzle="+std::to_string(laserFound)+" profile="+laserProfile+" cameraHistory=1");}catch(...){} }
  }
  if(extendedLogging()){
   static std::atomic<int> previous{-1};const int state=finalNative?0:(waiting?1:2);
-  if(state!=previous.exchange(state)){log("ETERNAL_WEAPON_HANDOFF state="+std::to_string(state)+" roots="+std::to_string(finalVisibilityCount)+" awaitingPose="+std::to_string(waiting));}
+  if(state!=previous.exchange(state))try{log("ETERNAL_WEAPON_HANDOFF state="+std::to_string(state)+" roots="+std::to_string(finalVisibilityCount)+" awaitingPose="+std::to_string(waiting));}catch(...){}
  }
  if(placedHands.load()!=uintptr_t(hands)||GetTickCount64()-placedTick.load()>=100||!presentation::gameplayInput.load()||presentation::syncAttack.load()||presentation::nativeAnimation.load()||presentation::droneAnimation.load())return;
  // Both projection factors are written by UpdatePosition after placement.
@@ -721,7 +729,7 @@ extern "C" bool argentMeathookTargetView(void* weapon,void* owner,float* origin,
  meathookQueryPose.valid=true;
  if(extendedLogging()){static std::atomic<uint64_t> last{};auto previous=last.load();unsigned char targeting{};read(object+0x23d0,&targeting,1);
   if(now-previous>=500&&last.compare_exchange_strong(previous,now))
-   log("ETERNAL_MEATHOOK viewApplied=1 pitch="+std::to_string(replacement[0])+" yaw="+std::to_string(replacement[1])+" targetingActive="+std::to_string(targeting));}
+   try{log("ETERNAL_MEATHOOK viewApplied=1 pitch="+std::to_string(replacement[0])+" yaw="+std::to_string(replacement[1])+" targetingActive="+std::to_string(targeting));}catch(...){} }
  return true;
  }catch(...){return false;}}
 extern "C" bool argentMeathookCandidateView(void* weapon,void* owner,float* origin,float* forward) noexcept {try{
@@ -731,7 +739,7 @@ extern "C" bool argentMeathookCandidateView(void* weapon,void* owner,float* orig
  if(!origin||!forward||!pose.valid||pose.weapon!=weapon||pose.owner!=owner||GetTickCount64()-pose.tick>=100)return false;
  std::memcpy(origin,pose.origin,sizeof(pose.origin));std::memcpy(forward,pose.forward,sizeof(pose.forward));
  if(argent::extendedLogging()){static std::atomic<uint64_t> last{};const auto now=GetTickCount64();auto previous=last.load();
-  if(now-previous>=500&&last.compare_exchange_strong(previous,now))argent::log("ETERNAL_MEATHOOK candidateViewApplied=1");}
+  if(now-previous>=500&&last.compare_exchange_strong(previous,now))try{argent::log("ETERNAL_MEATHOOK candidateViewApplied=1");}catch(...){} }
  return true;
  }catch(...){return false;}}
 extern "C" void argentHandsTransform(void* hands,void* root,float* origin,float* axis) noexcept {try{
