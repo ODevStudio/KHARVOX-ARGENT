@@ -74,10 +74,10 @@ bool completionFor(void* entity,unsigned short* handle,int frames,uintptr_t call
  // A pending native transition can initially reject the request, so retry here.
  if(GetTickCount64()-entryTick.load()<100){
   nativeStopDash(reinterpret_cast<void*>(owner),false);
-  if(extendedLogging())log("ETERNAL_MONKEYBAR dashHandoff=waiting-native-stop");
+  if(extendedLogging())try{log("ETERNAL_MONKEYBAR dashHandoff=waiting-native-stop");}catch(...){}
   return false;
  }
- if(extendedLogging())log("ETERNAL_MONKEYBAR dashHandoff=timeout native-completion=preserved");
+ if(extendedLogging())try{log("ETERNAL_MONKEYBAR dashHandoff=timeout native-completion=preserved");}catch(...){}
  return complete;
 }
 bool __fastcall completion(void* entity,unsigned short* handle,int frames) {
@@ -111,7 +111,7 @@ const float* axisFor(void* owner,uintptr_t caller) {
      static std::atomic<ULONGLONG> reported{};const auto now=facing.tick;
      auto previous=reported.load();
      if(now-previous>=2000&&reported.compare_exchange_strong(previous,now))
-      log("ETERNAL_FACING_TRIGGER view=HMD origin=native forward="+std::to_string(facing.axis[0])+","+std::to_string(facing.axis[1])+","+std::to_string(facing.axis[2]));
+      try{log("ETERNAL_FACING_TRIGGER view=HMD origin=native forward="+std::to_string(facing.axis[0])+","+std::to_string(facing.axis[1])+","+std::to_string(facing.axis[2]));}catch(...){}
     }
     return facing.axis;
    }
@@ -148,7 +148,7 @@ void cancelFor(void* mechanic,uintptr_t caller) {
   if(read(uintptr_t(mechanic)+0x18,&backlink,8)&&backlink==owner&&
      read(uintptr_t(mechanic)+0x50,&fsm,8)&&fsm&&read(fsm+0xc,&state,4)&&
      protectDashHandoff(caller,state,GetTickCount64()-entryTick.load())){
-   if(extendedLogging())log("ETERNAL_MONKEYBAR dashCancel=deferred state="+std::to_string(state));
+   if(extendedLogging())try{log("ETERNAL_MONKEYBAR dashCancel=deferred state="+std::to_string(state));}catch(...){}
    return;
   }
  }
@@ -163,7 +163,7 @@ void acceptedBar(uintptr_t owner) {
  if(!nativeStopDash||!local(reinterpret_cast<void*>(owner)))return;
  const bool active=activeDash(owner);
  if(active)nativeStopDash(reinterpret_cast<void*>(owner),false);
- if(extendedLogging())log(std::string("ETERNAL_MONKEYBAR accepted=1 dashActive=")+(active?"1 stop=requested refill=0":"0"));
+ if(extendedLogging())try{log(std::string("ETERNAL_MONKEYBAR accepted=1 dashActive=")+(active?"1 stop=requested refill=0":"0"));}catch(...){}
 }
 bool install(unsigned char* base) {try{
  std::lock_guard<std::mutex> lock(monkeyInstallationGuard);
@@ -224,5 +224,5 @@ extern "C" void argentMonkeyLaunch(void* mechanic,float* x,float* y) {
     done!=sizeof(backlink)||backlink!=owner)return;
  float origin[3],axis[9];
  if(camera::monkeyBarPose(origin,axis)&&monkey::launchHeading(axis,*x,*y)&&extendedLogging())
-  log("ETERNAL_MONKEYBAR launch=HMD x="+std::to_string(*x)+" y="+std::to_string(*y));
+  try{log("ETERNAL_MONKEYBAR launch=HMD x="+std::to_string(*x)+" y="+std::to_string(*y));}catch(...){}
 }

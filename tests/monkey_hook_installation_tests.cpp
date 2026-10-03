@@ -187,6 +187,42 @@ void runCase(std::string_view scenario){
     if(throwLogs||logFailureAt)check(logFailures>0,"Logging fault was not exercised");
     if(scenario=="format-oom")check(allocationFailures==1,"Formatting fault was not exercised");
 }
+unsigned nativeCalls{},stops{},cancellations{};
+bool nativeComplete{true};
+void* stoppedOwner{};
+bool refill{};
+const float nativeView[]{4,5,6,1,0,0,0,1,0};
+const float* __fastcall nativeGetter(void*){return nativeView;}
+void __fastcall nativeStop(void* owner,bool refillMeter){++stops;stoppedOwner=owner;refill=refillMeter;}
+bool __fastcall nativeCompleted(void*,unsigned short*,int){++nativeCalls;return nativeComplete;}
+void __fastcall nativeCancelled(void*){++cancellations;}
+void runCallback(std::string_view scenario){
+    using namespace argent;using namespace argent::monkey;
+    std::array<unsigned char,0x50000> playerBytes{};std::array<unsigned char,0x2b0> controller{};std::array<unsigned char,0x120> dash{};std::array<unsigned char,32> fsm{};
+    const auto owner=uintptr_t(playerBytes.data()),controllerAddress=uintptr_t(controller.data()),dashAddress=uintptr_t(dash.data()),fsmAddress=uintptr_t(fsm.data());
+    const auto mechanic=playerBytes.data()+0x36e48;const auto handle=reinterpret_cast<unsigned short*>(mechanic+0x108);const int state=2;
+    std::memcpy(playerBytes.data()+0x4ce88,&controllerAddress,8);std::memcpy(controller.data()+0x290,&owner,8);std::memcpy(controller.data()+0x298,&dashAddress,8);dash[0x118]=1;
+    std::memcpy(mechanic+0x18,&owner,8);std::memcpy(mechanic+0x50,&fsmAddress,8);std::memcpy(fsm.data()+12,&state,4);
+    presentation::player=owner;presentation::skippedMonkeyBarOwner=owner;presentation::worldPresentation=true;
+    nativeAxis=nativeOrigin=&nativeGetter;nativeStopDash=&nativeStop;nativeCancel=&nativeCancelled;nativeCompletion=&nativeCompleted;
+    entryOwner=owner;entryTick=testTick();facingEnabled=true;
+    throwLogs=scenario.find("-log")!=std::string_view::npos;const bool allocation=scenario.find("-oom")!=std::string_view::npos;if(allocation)failAfter=1;
+    if(scenario.rfind("callback-accepted-",0)==0){acceptedBar(owner);check(stops==1&&stoppedOwner==reinterpret_cast<void*>(owner)&&!refill&&entryOwner.load()==owner&&entryTick.load()==testTick(),"Accepted-bar diagnostic changed native dash handoff");}
+    else if(scenario.rfind("callback-waiting-",0)==0)check(!completionFor(nullptr,handle,1,0x1398a8c)&&nativeCalls==1&&stops==1&&!refill,"Waiting diagnostic changed completion or skipped native stop");
+    else if(scenario.rfind("callback-timeout-",0)==0){entryTick=testTick()-100;check(completionFor(nullptr,handle,1,0x1398a8c)&&nativeCalls==1&&!stops,"Timeout diagnostic changed native completion");}
+    else if(scenario.rfind("callback-facing-",0)==0){
+        const auto forward=axisFor(reinterpret_cast<void*>(owner),0xd9d168);check(forward!=nativeView&&forward[1]==.8f&&forward[2]==.6f,"Facing diagnostic lost the HMD result");
+        check(originFor(reinterpret_cast<void*>(owner),0xd9d185)[0]==4&&!facing.valid&&originFor(reinterpret_cast<void*>(owner),0xd9d185)==nativeView,"Facing diagnostic changed native-origin snapshot consumption");
+    }
+    else if(scenario.rfind("callback-cancel-",0)==0){cancelFor(mechanic,0xfbdc3a);check(!cancellations,"Cancellation diagnostic abandoned protected dash handoff");}
+    else if(scenario.rfind("callback-launch-",0)==0){float x=9,y=10;argentMonkeyLaunch(mechanic,&x,&y);check(x==0&&y==1,"Launch diagnostic changed the selected HMD direction");}
+    else if(scenario=="callback-native-false"){nativeComplete=false;check(!completionFor(nullptr,handle,1,0x1398a8c)&&nativeCalls==1&&!stops&&!logCalls,"Adapter changed a native incomplete result");}
+    else if(scenario=="callback-remote-facing")check(axisFor(reinterpret_cast<void*>(owner+1),0xd9d168)==nativeView&&!facing.valid&&!logCalls,"Adapter changed a remote native getter result");
+    else check(false,"Unknown callback scenario");
+    failAfter=-1;
+    if(throwLogs)check(logFailures==1,"Callback logging failure was not exercised");
+    if(allocation)check(allocationFailures==1,"Callback formatting failure was not exercised");
+}
 bool child(const wchar_t* executable,const std::wstring& scenario,bool store){
     std::wstring command=L"\""+std::wstring(executable)+L"\" "+scenario+(store?L" store":L"");STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
     check(CreateProcessW(executable,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process),"Installer child unavailable");
@@ -200,13 +236,18 @@ bool child(const wchar_t* executable,const std::wstring& scenario,bool store){
 int main(int argc,char** argv){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);_set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",L"1");
     try{
-        if(argc>1){argent::build::microsoftStore=argc>2;Image image;imageBytes=image.bytes;runCase(argv[1]);return 0;}
+        const bool callbacksOnly=argc>1&&std::string_view(argv[1])=="--callbacks";
+        if(argc>1&&!callbacksOnly){argent::build::microsoftStore=argc>2;Image image;imageBytes=image.bytes;const std::string_view scenario=argv[1];if(scenario.rfind("callback-",0)==0)runCallback(scenario);else runCase(scenario);return 0;}
         wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768)!=0,"Executable path unavailable");unsigned cases{},failures{};
         for(const bool store:{false,true}){
+            if(!callbacksOnly){
             for(const auto scenario:{L"normal",L"null",L"prepared",L"repeat",L"different-image",L"logs",L"log-first",L"log-final",L"format-oom",L"optional-facing",L"concurrent"}){++cases;failures+=!child(executable,scenario,store);}
             for(unsigned i=0;i<std::size(signatures)+std::size(branches);++i){++cases;failures+=!child(executable,L"signature-"+std::to_wstring(i),store);}
             for(unsigned i=0;i<5;++i)for(const auto prefix:{L"create-",L"enable-",L"conflict-",L"remove-fatal-"}){++cases;failures+=!child(executable,prefix+std::to_wstring(i),store);}
+            }
+            for(const auto kind:{L"accepted",L"waiting",L"timeout",L"facing",L"cancel",L"launch"})for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-"+std::wstring(kind)+L"-"+mode,store);}
+            for(const auto scenario:{L"callback-native-false",L"callback-remote-facing"}){++cases;failures+=!child(executable,scenario,store);}
         }
-        std::cout<<cases<<" production monkey hook installation scenarios, "<<failures<<" failures\n";return failures?1:0;
+        std::cout<<cases<<" production monkey hook scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){failAfter=-1;std::cerr<<error.what()<<'\n';return 1;}
 }
