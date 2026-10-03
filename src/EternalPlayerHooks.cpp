@@ -207,8 +207,9 @@ void __fastcall hideItem(void* item){
  originalHideItem(item);
 }
 bool zoomPresentationActive(){
- return presentation::gameplayInput.load()&&!presentation::syncAttack.load()&&!presentation::nativeAnimation.load()&&!presentation::droneAnimation.load()&&
-        GetTickCount64()-zoomTick.load()<100;
+ const auto tick=zoomTick.load();
+ return tick&&camera::weaponContext()!=0&&presentation::gameplayInput.load()&&!presentation::syncAttack.load()&&!presentation::nativeAnimation.load()&&!presentation::droneAnimation.load()&&
+        !presentation::scriptedMovement.load()&&!presentation::monkeyBarAnimation.load()&&GetTickCount64()-tick<100;
 }
 void __fastcall zoomBlend(void* hands,float blend){
  originalZoomBlend(hands,vrWeaponZoomBlend(blend,zoomPresentationActive()&&zoomHands.load()==uintptr_t(hands)));
@@ -259,13 +260,15 @@ bool prepareZoomDecl(uintptr_t decl) noexcept {
 bool precisionBoltActive(void* hands) {
  const auto weapon=zoomWeapons[0].load();int selected=-1;
  if(!weapon||zoomHands.load()!=uintptr_t(hands)||!zoomPresentationActive()||!read(weapon+0x19e8,&selected,4)||selected!=1)return false;
+ const auto handle=uintptr_t(hands)+0x29b0;uint32_t generation{},cached{};
+ if(!read(handle+0x30,&generation,4)||!read(handle+0x34,&cached,4)||generation!=cached||generation==0x1fffffe||ptr(handle+0x38)!=weapon)return false;
  using Decl=void*(__fastcall*)(void*,int);
  const auto decl=reinterpret_cast<uintptr_t>(reinterpret_cast<Decl>(image+build::rva(0x16c0f90))(reinterpret_cast<void*>(weapon),1));
  constexpr char expected[]="weapon/player/heavy_cannon_bolt_action";char name[sizeof(expected)]{};
  return read(ptr(decl+8),name,sizeof(name))&&std::memcmp(name,expected,sizeof(name))==0;
 }
 void prepareZoom(void* hands,bool active) noexcept {
- zoomHands=0;zoomWeapons[0]=0;zoomWeapons[1]=0;
+ zoomTick=0;zoomHands=0;zoomWeapons[0]=0;zoomWeapons[1]=0;
  if(!active)return;
  __try {
   using Resolve=void*(__fastcall*)(void*);
@@ -291,7 +294,7 @@ void prepareZoom(void* hands,bool active) noexcept {
   zoomHands=uintptr_t(hands);zoomTick=GetTickCount64();
   // Also clears a blend that was already active on entering immersive mode.
   originalZoomBlend(hands,0.f);
- }__except(EXCEPTION_EXECUTE_HANDLER){zoomHands=0;zoomWeapons[0]=0;zoomWeapons[1]=0;}
+ }__except(EXCEPTION_EXECUTE_HANDLER){zoomTick=0;zoomHands=0;zoomWeapons[0]=0;zoomWeapons[1]=0;}
 }
 // Exact native accessor: idPlayer+8a50 -> physics vtable slot 78h, origin(0).
 bool physics(void* hands,uintptr_t& owner,XrVector3f& origin){

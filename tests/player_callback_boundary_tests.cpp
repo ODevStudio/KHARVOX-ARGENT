@@ -26,6 +26,9 @@ uint64_t currentContext=1;
 uintptr_t attachmentResult=0x123401;
 unsigned attachmentStateCalls{};
 int attachmentState{};
+void* resolvedWeapon{};void* resolvedDecl{};void* expectedHandle{};
+unsigned zoomDeclCalls{},zoomDeclFailure{},rootPublications{};
+float receivedBlend{-1};bool throwPublication{},failZoomBlend{};
 int failAfter=-1;
 void* caller{};
 void* testCaller(){return caller;}
@@ -113,6 +116,11 @@ uintptr_t __fastcall nativeAttachment(void* model,void*,int mode,void* joint,flo
     if(attachmentResult&0xff){const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memcpy(axis,headBasis.data(),sizeof(headBasis));}return attachmentResult;
 }
 int __fastcall nativeHandsState(void* hands,bool flag){++attachmentStateCalls;check(uintptr_t(hands)==argent::player::animationHands&&!flag,"Attachment changed native animation-state arguments");return attachmentState;}
+void __fastcall nativeZoomBlend(void*,float blend){++nativeCalls;receivedBlend=blend;if(failZoomBlend)RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);nativeFailure();}
+int __fastcall nativeZoomMode(void*){++nativeCalls;nativeFailure();return 1;}
+void* __fastcall nativeResolve(void* handle){check(handle==expectedHandle,"Zoom resolved a different native handle");return resolvedWeapon;}
+void* __fastcall nativeZoomDecl(void* weapon,int slot){++zoomDeclCalls;check(weapon==resolvedWeapon&&(slot==0||slot==1),"Zoom changed native declaration arguments");if(zoomDeclCalls==zoomDeclFailure)RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);return resolvedDecl;}
+void __fastcall nativeRootPublish(void* root){++rootPublications;check(root==observedRoot&&nativeCalls==1,"Precision Bolt published before native item animation");if(throwPublication)throw std::bad_alloc{};put(root,0xb0,static_cast<unsigned char>(get<unsigned char>(root,0xb0)&~1));}
 void __fastcall nativeHide(void* root,int surface){++hideCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask&~(uint64_t(1)<<surface));}
 void __fastcall nativeShow(void* root,int surface){++showCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask|(uint64_t(1)<<surface));}
 bool __fastcall nativeTransform(void*,void*,float* origin,float* axis){++nativeCalls;nativeFailure();const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memset(axis,0,9*sizeof(float));return true;}
@@ -182,6 +190,44 @@ void runCase(std::string_view scenario){
         check(valid?std::strcmp(identity.name,name.data())==0:identity.name[0]==0,"Identity lost a valid name or retained rejected source bytes");
         if(kind=="identity-bulk")check(reads<=9,"Native identity still uses byte-at-a-time name reads");
         if(kind=="identity-heap")check(allocationFailures==0,"Native identity allocated heap storage");
+    }else if(kind.rfind("zoom-",0)==0||kind.rfind("precision",0)==0){
+        std::array<char,256> name{};std::strcpy(name.data(),"weapon/player/heavy_cannon_bolt_action");put(objects.decl.data(),8,uintptr_t(name.data()));
+        put(objects.weapon.data(),0,uintptr_t(image.bytes)+0x1000);put(objects.weapon.data(),0x19e8,int(1));put(objects.hands.data(),0x29b0+8,uintptr_t(1));
+        put(objects.hands.data(),0x29b0+0x78,uintptr_t(objects.root.data()));put(objects.root.data(),0xb0,static_cast<unsigned char>(1));
+        put(objects.decl.data(),0x1700,80.f);put(objects.decl.data(),0x1704,60.f);put(objects.decl.data(),0x1750,static_cast<unsigned char>(1));
+        put(objects.decl.data(),0x176c,int(1));put(objects.decl.data(),0x1788,int(1));put(objects.decl.data(),0x2160,uintptr_t(1));
+        expectedHandle=objects.hands.data()+0x29b0;resolvedWeapon=objects.weapon.data();resolvedDecl=objects.decl.data();originalZoomBlend=&nativeZoomBlend;originalZoomMode=&nativeZoomMode;
+        image.stub(0x135f230,&nativeResolve);image.stub(0x16c0f90,&nativeZoomDecl);image.stub(0x18dbf20,&nativeRootPublish);
+        presentation::gameplayInput=true;zoomHands=uintptr_t(objects.hands.data());zoomWeapons[0]=uintptr_t(objects.weapon.data());zoomTick=currentTick;
+        if(kind.rfind("zoom-prepare",0)==0){
+            if(kind=="zoom-prepare-fault1")zoomDeclFailure=1;if(kind=="zoom-prepare-fault2")zoomDeclFailure=2;
+            failZoomBlend=kind=="zoom-prepare-blend-fault";
+            if(kind=="zoom-prepare-meathook")put(objects.weapon.data(),0,uintptr_t(image.bytes)+build::rva(0x2e0dbc8));
+            prepareZoom(objects.hands.data(),kind!="zoom-prepare-inactive");const bool active=kind=="zoom-prepare-normal";
+            check(zoomPresentationActive()==active&&zoomHands.load()==(active?uintptr_t(objects.hands.data()):0),"Failed/inactive zoom preparation kept an active publication timestamp");
+            if(active)check(get<float>(objects.decl.data(),0x1700)==80&&get<float>(objects.decl.data(),0x1704)==80&&get<unsigned char>(objects.decl.data(),0x1750)==0&&get<int>(objects.decl.data(),0x176c)==0&&get<int>(objects.decl.data(),0x1788)==2&&get<uintptr_t>(objects.decl.data(),0x2160)==0&&receivedBlend==0,"Zoom preparation lost its validated presentation-only changes");
+        }else if(kind.rfind("zoom-gate",0)==0){
+            if(kind=="zoom-gate-scripted")presentation::scriptedMovement=true;if(kind=="zoom-gate-monkey")presentation::monkeyBarAnimation=true;
+            if(kind=="zoom-gate-context")currentContext=0;if(kind=="zoom-gate-stale")zoomTick=1;if(kind=="zoom-gate-zero")currentTick=zoomTick=0;
+            const bool active=kind=="zoom-gate-normal";check(zoomPresentationActive()==active,"Zoom presentation retained an ineligible camera context");
+            zoomBlend(objects.hands.data(),.625f);check(receivedBlend==(active?0:.625f)&&nativeCalls==1,"Zoom blend changed native dispatch or an ineligible blend");
+            check(zoomMode(objects.weapon.data())==(active?2:1)&&nativeCalls==2,"Zoom mode changed native dispatch or an ineligible mode");
+        }else{
+            if(kind=="precision-generation")put(objects.hands.data(),0x29b0+0x34,uint32_t(2));
+            if(kind=="precision-invalid-generation"){put(objects.hands.data(),0x29b0+0x30,uint32_t(0x1fffffe));put(objects.hands.data(),0x29b0+0x34,uint32_t(0x1fffffe));}
+            if(kind=="precision-weapon-swap")put(objects.hands.data(),0x29b0+0x38,uintptr_t(objects.root.data()));
+            if(kind=="precision-mode")put(objects.weapon.data(),0x19e8,int(0));if(kind=="precision-decl")resolvedDecl=nullptr;
+            if(kind=="precision-name")name[std::strlen(name.data())]='_';
+            const bool active=kind=="precision-normal"||kind.rfind("precision-publish",0)==0;
+            check(precisionBoltActive(objects.hands.data())==active,"Precision Bolt accepted an unrelated or stale primary weapon");
+            if(kind=="precision-generation"||kind=="precision-invalid-generation"||kind=="precision-weapon-swap")check(zoomDeclCalls==0,"Precision Bolt queried a stale native weapon declaration");
+            if(kind.rfind("precision-publish",0)==0){
+                placedHands=uintptr_t(objects.hands.data());placedTick=currentTick;throwPublication=kind=="precision-publish-native";animationItem=0x123;animationHands=0x456;
+                arm(mode);bool escaped{};try{updateItemAnimation(expectedHandle,objects.hands.data());}catch(const std::bad_alloc&){escaped=true;}disarm();
+                check(escaped==throwPublication&&nativeCalls==1&&rootPublications==1&&animationItem==0x123&&animationHands==0x456,"Precision publication lost native ordering, exceptions or restored context");
+                if(!throwPublication)check(get<unsigned char>(objects.root.data(),0xb0)==0,"Precision publication did not reveal the animated child root");
+            }
+        }
     }else if(kind.rfind("crucible",0)==0){
         arm(mode);const int type=kind.back()-'0';const auto result=type==0?crucibleEvent<0>(objects.hands.data(),1,2,3,4,5):type==1?crucibleEvent<1>(objects.hands.data(),1,2,3,4,5):crucibleEvent<2>(objects.hands.data(),1,2,3,4,5);disarm();
         check(result==0x1234&&nativeCalls==1,"Crucible observer changed a native result");
@@ -343,13 +389,14 @@ int main(int argc,char** argv){
         if(argc>1){argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",argc>3&&std::string_view(argv[3])=="timing"?L"1":L"0");if(std::string_view(argv[1])=="identity-benchmark")benchmarkIdentity();else runCase(argv[1]);return 0;}
         wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768),"Player callback path unavailable");unsigned cases{},failures{};
         for(const bool store:{false,true})for(const bool timing:{false,true}){
-            for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate",L"attachment"})for(const auto mode:{L"normal",L"log",L"oom"}){
+            for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate",L"attachment",L"precision-publish"})for(const auto mode:{L"normal",L"log",L"oom"}){
                 if(!timing&&std::wstring_view(mode)!=L"normal")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-"+mode,store,timing);
             }
             for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"visibility-interleaved",L"visibility-shared",L"visibility-replaced-entity",L"visibility-replaced-model",L"visibility-invalid",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"attachment-failed",L"attachment-failed-high",L"attachment-native",L"attachment-guard-caller",L"attachment-guard-owner",L"attachment-guard-item",L"attachment-guard-root",L"attachment-guard-stale",L"attachment-guard-profile",L"attachment-guard-placement",L"attachment-rest-swing",L"attachment-rest-failed",L"attachment-rest-context",L"attachment-rest-manual"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"attachment-guard-gameplay",L"attachment-guard-context",L"attachment-guard-scripted",L"attachment-guard-monkey",L"attachment-guard-drone",L"attachment-guard-authored"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
             for(const auto kind:{L"identity-bulk",L"identity-page-tail",L"identity-page-unterminated",L"identity-unreadable",L"identity-long",L"identity-generation",L"identity-decl",L"identity-heap"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"zoom-prepare-normal",L"zoom-prepare-fault1",L"zoom-prepare-fault2",L"zoom-prepare-blend-fault",L"zoom-prepare-meathook",L"zoom-prepare-inactive",L"zoom-gate-normal",L"zoom-gate-scripted",L"zoom-gate-monkey",L"zoom-gate-context",L"zoom-gate-stale",L"zoom-gate-zero",L"precision-normal",L"precision-generation",L"precision-invalid-generation",L"precision-weapon-swap",L"precision-mode",L"precision-decl",L"precision-name",L"precision-publish-native"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){disarm();std::cerr<<error.what()<<'\n';return 1;}
