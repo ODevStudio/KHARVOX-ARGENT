@@ -77,14 +77,15 @@ Result __fastcall evaluate(VkCommandBuffer command,void* handle,void* nativePara
     // NGX parameter methods are not thread-safe. Serialize only this pair of
     // feature evaluations, not game draws or command recording in general.
     std::lock_guard<std::mutex> lock(mutex);auto found=pairs.find(handle);
-    if(found==pairs.end()||!input){fallback("missing stereo history");return evaluateOriginal(command,handle,nativeParams,input);}
+    if(found==pairs.end()||!input){if(found!=pairs.end())found->second.seen=false;fallback("missing stereo history");return evaluateOriginal(command,handle,nativeParams,input);}
     auto& pair=found->second;std::array<EyeParameters,2> eyes;sfs::FramePose pose;
     bool valid{};
     try{valid=prepareEyes(*input,eyes,[&](const auto& resources,auto& out){return sfs::dlssEyeResources(command,resources,out,pose);},false);}catch(...){}
-    if(!valid){fallback("unsupported eye resource contract");return evaluateOriginal(command,handle,nativeParams,input);}
+    if(!valid){pair.seen=false;fallback("unsupported eye resource contract");return evaluateOriginal(command,handle,nativeParams,input);}
     const auto tick=GetTickCount64();
     const bool reset=!pair.seen||pair.quad!=pose.quadView||pair.stereoQuad!=pose.stereoQuad||pose.recenterRequested||tick-pair.tick>250||pose.serial<pair.serial||pose.serial>pair.serial+1;
     if(reset)for(auto& eye:eyes)eye.params.set<int>(0x38,1);
+    pair.seen=false;
     const auto left=evaluateOriginal(command,handle,nativeParams,&eyes[0].params);
     const auto right=left==success?evaluateOriginal(command,pair.right,nativeParams,&eyes[1].params):left;
     if(left!=success||right!=success){fallback("native evaluation failed");return left!=success?left:right;}

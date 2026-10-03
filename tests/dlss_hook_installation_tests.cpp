@@ -228,6 +228,7 @@ int main(int argc,char** argv){
                 for(const auto kind:{L"create",L"duplicate",L"right-error",L"right-null",L"right-alias",L"release",L"release-left-error",L"missing",L"null-input",L"resources-invalid",L"resolve-error",L"resolve-exception",L"left-eval-error",L"right-eval-error",L"evaluate"})for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-"+std::wstring(kind)+L"-"+mode,store,requests,timing);}
                 if(timing)for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-window-"+std::wstring(mode),store,requests,timing);}
                 for(const auto scenario:{L"callback-left-error-normal",L"callback-left-null-normal",L"callback-output-null-normal",L"callback-other-feature-normal",L"callback-create-native-throw-normal",L"callback-release-native-throw-normal",L"callback-evaluate-native-throw-normal",L"callback-registration-cleanup-error-normal",L"callback-release-right-error-normal"}){++cases;failures+=!child(executable,scenario,store,requests,timing);}
+                for(const auto failure:{L"left-error",L"right-error",L"null-input",L"resolve-error",L"resolve-exception",L"left-throw",L"right-throw"}){++cases;failures+=!child(executable,L"callback-recovery-"+std::wstring(failure)+L"-normal",store,requests,timing);}
             }
         }
         std::cout<<cases<<" production DLSS hook scenarios, "<<failures<<" failures\n";return failures?1:0;

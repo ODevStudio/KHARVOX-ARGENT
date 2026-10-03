@@ -5,6 +5,7 @@ void* const priorRight=reinterpret_cast<void*>(uintptr_t(0x320));
 void* const nativeParameters=reinterpret_cast<void*>(uintptr_t(0x420));
 const auto commandBuffer=reinterpret_cast<VkCommandBuffer>(uintptr_t(0x520));
 unsigned nativeCreates{},nativeReleases{},nativeEvaluations{};
+unsigned throwEvaluationAt{};
 DlssResult leftCreation{1},rightCreation{1},leftEvaluation{1},rightEvaluation{1},leftRelease{1},rightRelease{1};
 bool nullLeft{},nullRight{},aliasRight{},armCreationOom{},throwNativeCreate{},throwNativeRelease{},throwNativeEvaluate{};
 std::array<void*,4> released{};
@@ -22,7 +23,7 @@ DlssResult __fastcall nativeRelease(void* handle){
 }
 DlssResult __fastcall nativeEvaluate(VkCommandBuffer command,void* handle,void* parameters,const argent::dlss::Parameters* input){
     check(command==commandBuffer&&parameters==nativeParameters,"Evaluation changed native arguments");check(nativeEvaluations<evaluated.size(),"Evaluation called more than expected");
-    evaluated[nativeEvaluations]=handle;if(input)evaluatedParameters[nativeEvaluations]=*input;++nativeEvaluations;if(throwNativeEvaluate)throw std::bad_alloc{};
+    evaluated[nativeEvaluations]=handle;if(input)evaluatedParameters[nativeEvaluations]=*input;++nativeEvaluations;if(throwNativeEvaluate||nativeEvaluations==throwEvaluationAt)throw std::bad_alloc{};
     if(input&&input!=originalParameters){
         for(unsigned i=0;i<4;++i){const auto resource=input->get<const argent::dlss::Resource*>(argent::dlss::resourceOffsets[i]);check(resource&&resource!=originalParameters->get<const argent::dlss::Resource*>(argent::dlss::resourceOffsets[i])&&resource->range.baseArrayLayer==nativeEvaluations-1,"Evaluation borrowed the wrong eye resource");}
     }
@@ -74,6 +75,28 @@ void runCallback(std::string_view scenario,const Requests& requests){
         for(unsigned i=0;i<4;++i){resources[i].view=reinterpret_cast<VkImageView>(uintptr_t(10+i));resources[i].image=reinterpret_cast<VkImage>(uintptr_t(20+i));input.set<const Resource*>(resourceOffsets[i],&resources[i]);}
         input.set<uint32_t>(0x30,100);input.set<uint32_t>(0x34,200);const auto bytes=input.bytes;originalParameters=&input;resolvedPose.serial=4;
         if(kind!="missing")pairs.emplace(leftHistory,Pair{rightHistory});
+        if(kind.rfind("recovery-",0)==0){
+            const auto failure=kind.substr(9);auto& pair=pairs.at(leftHistory);
+            pair.seen=true;pair.serial=3;pair.tick=testTick();pair.samples=17;
+            const bool nativeException=failure=="left-throw"||failure=="right-throw";
+            if(failure=="left-error")leftEvaluation=8;
+            if(failure=="right-error")rightEvaluation=9;
+            if(failure=="resolve-error")resolveReady=false;
+            if(failure=="resolve-exception")throwResolve=true;
+            if(nativeException)throwEvaluationAt=failure=="left-throw"?1:2;
+            DlssResult result{};bool escaped{};
+            try{result=evaluate(commandBuffer,leftHistory,nativeParameters,failure=="null-input"?nullptr:&input);}catch(const std::bad_alloc&){escaped=true;}
+            check(escaped==nativeException,"History recovery changed native exception propagation");
+            check(nativeException||result==(failure=="right-error"?rightEvaluation:leftEvaluation),"History recovery changed native failure result");
+            check(nativeEvaluations==((failure=="right-error"||failure=="right-throw")?2u:1u),"History failure changed native eye call count");
+            check(!pair.seen&&pair.serial==3&&pair.samples==17,"Partial evaluation retained a synchronized history marker");
+            checkFallback(requests,!nativeException);
+            nativeEvaluations=throwEvaluationAt=0;leftEvaluation=rightEvaluation=1;resolveReady=true;throwResolve=false;
+            check(evaluate(commandBuffer,leftHistory,nativeParameters,&input)==success&&nativeEvaluations==2,"Stereo histories did not recover after evaluation failure");
+            check(evaluatedParameters[0].get<int>(0x38)==1&&evaluatedParameters[1].get<int>(0x38)==1,"Recovered evaluation did not reset both eye histories");
+            check(pair.seen&&pair.serial==4&&pair.tick==testTick()&&pair.samples==18&&input.bytes==bytes,"Recovered evaluation changed caller parameters or lost temporal state");
+            checkFallback(requests,!nativeException);return;
+        }
         const Parameters* supplied=&input;
         if(kind=="null-input")supplied=nullptr;
         if(kind=="resources-invalid"){resources[0].type=1;}
