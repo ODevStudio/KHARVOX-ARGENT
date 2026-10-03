@@ -23,6 +23,7 @@
 #include "openxr/ControllerInput.h"
 #include <MinHook.h>
 #include <intrin.h>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <map>
@@ -657,114 +658,7 @@ KharvoxWeaponKind hapticWeapon() noexcept {
 }
 bool crucibleEquipped() noexcept {return GetTickCount64()-hapticTick.load()<100&&crucibleHeld.load();}
 const char* weaponProfile() noexcept {return GetTickCount64()-hapticTick.load()<100?calibrationWeaponProfile.load():"default";}
-bool install(unsigned char* verifiedImage) noexcept {try{
- image=verifiedImage;
- // Shared Steam/Store field access, checked before installing any player hook.
- constexpr unsigned char equipmentContract[]={0x49,0x8b,0x45,0x38,0x48,0x8b,0x8b,0x58,0x03,0x00,0x00,0x44,0x8b,0xa0,0x08,0x02,0x00,0x00};
- if(!image||std::memcmp(image+build::rva(0x135f280)+0xf6,equipmentContract,sizeof(equipmentContract))){log("ETERNAL_PLAYER refused: equipment slot contract mismatch");return false;}
- constexpr unsigned char transformBytes[]={0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20,0x41,0x56};
- constexpr unsigned char throwBytes[]={0x4d,0x85,0xc0,0x0f,0x84,0x35,0x01,0,0,0x55,0x56,0x57,0x41,0x56,0x41,0x57};
- if(std::memcmp(image+build::rva(0x1389020),transformBytes,sizeof(transformBytes))||
-    std::memcmp(image+build::rva(0x1389910),throwBytes,sizeof(throwBytes))){log("ETERNAL_PLAYER refused: equipment transform/throw contract mismatch");return false;}
- constexpr unsigned char wallGateBytes[]={0x80,0xbf,0x50,0x17,0,0,0};
- constexpr unsigned char wallImpulseBytes[]={0x0f,0x28,0xc8,0x0f,0xc6,0xc9,0x55};
- if(std::memcmp(image+build::rva(0x13bc530),wallGateBytes,sizeof(wallGateBytes))||
-    std::memcmp(image+build::rva(0x13b98f8),wallImpulseBytes,sizeof(wallImpulseBytes))){log("ETERNAL_PLAYER refused: wall-climb direction contract mismatch");return false;}
- // Supported PE: native player FocusTracker at player+0x167f8. Both ray
- // endpoints are complete here, before Translation calls at 134b166/134b1d2.
- constexpr unsigned char focusBytes[]={0x0f,0x28,0x45,0xd0,0x0f,0x11,0x8e,0x68,0x02,0x00,0x00};
- if(!image||std::memcmp(image+build::rva(0x134b00e),focusBytes,sizeof(focusBytes)))return false;
- if(MH_CreateHook(image+build::rva(0x134b00e),reinterpret_cast<void*>(&argentFocusBridge),&argentFocusResume)!=MH_OK||
-    MH_EnableHook(image+build::rva(0x134b00e))!=MH_OK)return false;
- log("ETERNAL_FOCUS installed=1 origin=HMD direction=HMD reach=native");
- constexpr unsigned char meathookBytes[]={0x48,0x8d,0x95,0x58,0x01,0,0,0x48,0x8d,0x8d,0x90,0,0,0};
- const auto meathookTarget=image+build::rva(0x16b8351);
- if(std::memcmp(meathookTarget,meathookBytes,sizeof(meathookBytes))||
-    MH_CreateHook(meathookTarget,reinterpret_cast<void*>(&argentMeathookBridge),&argentMeathookResume)!=MH_OK||
-    MH_EnableHook(meathookTarget)!=MH_OK)return false;
- log("ETERNAL_MEATHOOK targetView=weapon-controller rangeAndLOS=native");
- constexpr unsigned char gateBytes[]={0xf3,0x0f,0x10,0x45,0x68,0xf3,0x0f,0x10,0x6d,0x30,0xf3,0x0f,0x10,0x5d,0x34};
- const auto gateTarget=image+build::rva(0x16b8e76);
- if(std::memcmp(gateTarget,gateBytes,sizeof(gateBytes))||
-    MH_CreateHook(gateTarget,reinterpret_cast<void*>(&argentMeathookGateBridge),&argentMeathookGateResume)!=MH_OK||
-    MH_EnableHook(gateTarget)!=MH_OK)return false;
- log("ETERNAL_MEATHOOK candidateAngleGate=weapon-controller nativeLimits=preserved");
- constexpr unsigned char blendBytes[]={0x48,0x83,0xec,0x38,0x0f,0x29,0x74,0x24,0x20,0x0f,0x28,0xf1};
- constexpr unsigned char modeBytes[]={0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9};
- constexpr unsigned char fovBytes[]={0x48,0x83,0xec,0x38,0x48,0x83,0xb9,0x58,0x01,0x00,0x00,0x00,0x4c,0x8b,0xc1};
- constexpr unsigned char parentShowBytes[]={0x80,0xa1,0xb0,0x00,0x00,0x00,0xfe};
- if(std::memcmp(image+build::rva(0x18dbf20),parentShowBytes,sizeof(parentShowBytes)))return false;
- constexpr unsigned char hideBytes[]={0x40,0x53,0x48,0x83,0xec,0x20,0x48,0x8b,0xd9};
- if(!image||std::memcmp(image+build::rva(0x13693f0),blendBytes,sizeof(blendBytes))||std::memcmp(image+build::rva(0x16c4080),modeBytes,sizeof(modeBytes))||std::memcmp(image+build::rva(0x16c4280),fovBytes,sizeof(fovBytes))||std::memcmp(image+build::rva(0x13891f0),hideBytes,sizeof(hideBytes))||std::memcmp(image+build::rva(0x138a0e0),hideBytes,sizeof(hideBytes)))return false;
- if(MH_CreateHook(image+build::rva(0x13891f0),reinterpret_cast<void*>(&hideItem),reinterpret_cast<void**>(&originalHideItem))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x13891f0))!=MH_OK)return false;
- log("ETERNAL_MELEE weaponVisibility=retain-primary-normal-punch sync=native");
- if(MH_CreateHook(image+build::rva(0x13693f0),reinterpret_cast<void*>(&zoomBlend),reinterpret_cast<void**>(&originalZoomBlend))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x13693f0))!=MH_OK)return false;
- if(MH_CreateHook(image+build::rva(0x16c4080),reinterpret_cast<void*>(&zoomMode),reinterpret_cast<void**>(&originalZoomMode))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x16c4080))!=MH_OK)return false;
- if(MH_CreateHook(image+build::rva(0x16c4280),reinterpret_cast<void*>(&zoomFov),reinterpret_cast<void**>(&originalZoomFov))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x16c4280))!=MH_OK)return false;
- constexpr unsigned char itemAnimationBytes[]={0x40,0x55,0x56,0x41,0x55,0x41,0x56,0x48,0x8d,0x6c,0x24,0xc1,0x48,0x81,0xec,0xd8,0,0,0};
- if(std::memcmp(image+build::rva(0x138ab20),itemAnimationBytes,sizeof(itemAnimationBytes))||
-    MH_CreateHook(image+build::rva(0x138ab20),reinterpret_cast<void*>(&updateItemAnimation),reinterpret_cast<void**>(&originalItemAnimation))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x138ab20))!=MH_OK)return false;
- log("ETERNAL_PLAYER zoomPresentation=no-hand-animation scope=off handsFov=world zoomTarget=gameplay-fov");
- constexpr unsigned char stateBytes[]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,0x57,0x48,0x83,0xec,0x20};
- if(std::memcmp(image+build::rva(0x135f130),stateBytes,sizeof(stateBytes)))return false;
- constexpr uintptr_t eventRvas[]={0x135aa00,0x135ab80,0x135ad00};
- const CrucibleEvent eventHooks[]={crucibleEvent<0>,crucibleEvent<1>,crucibleEvent<2>};
- for(int i=0;i<3;++i){
-  unsigned char expected[]={0x48,0x89,0x5c,0x24,0x18,0x48,0x89,0x6c,0x24,0x20,0x56,0x48,0x81,0xec,0x80,0,0,0};
-  if(i==2)expected[10]=0x57;
-  auto target=image+build::rva(eventRvas[i]);
-  if(std::memcmp(target,expected,sizeof(expected))||MH_CreateHook(target,reinterpret_cast<void*>(eventHooks[i]),
-     reinterpret_cast<void**>(&originalCrucibleEvents[i]))!=MH_OK||MH_EnableHook(target)!=MH_OK)return false;
- }
- constexpr unsigned char attachmentBytes[]={0x48,0x83,0xec,0x48,0x48,0x8b,0x44,0x24,0x78,0x45,0x8b,0xd0};
- if(std::memcmp(image+build::rva(0x1981bc0),attachmentBytes,sizeof(attachmentBytes))||
-    MH_CreateHook(image+build::rva(0x1981bc0),reinterpret_cast<void*>(&attachmentJoint),reinterpret_cast<void**>(&originalAttachmentJoint))!=MH_OK||
-    MH_EnableHook(image+build::rva(0x1981bc0))!=MH_OK)return false;
- log("ETERNAL_CRUCIBLE restAttachmentHook=1 velocityOnly=1 hitAndTrigger=native");
- constexpr unsigned char rootBytes[]={0x0f,0xb6,0x86,0xb0,0x00,0x00,0x00,0x0f,0x10,0x45,0xd0,0x24,0x0c,0x3c,0x0c};
- constexpr unsigned char fireBytes[]={0x4c,0x8b,0xdc,0x55,0x53,0x56,0x57,0x41,0x55,0x41,0x56,0x41,0x57};
- // install is only called after camera::approvedImage validates the full PE.
- if(!image||std::memcmp(image+build::rva(0x13807ea),rootBytes,sizeof(rootBytes))||std::memcmp(image+build::rva(0x135f280),fireBytes,sizeof(fireBytes)))return false;
- auto result=MH_CreateHook(image+build::rva(0x13807ea),reinterpret_cast<void*>(&argentHandsBridge),&argentHandsResume);
- if(result!=MH_OK){log("ETERNAL_PLAYER hands create="+std::to_string(result));return false;}
- if(MH_EnableHook(image+build::rva(0x13807ea))!=MH_OK)return false;
- constexpr unsigned char updateBytes[]={0x48,0x8b,0xc4,0x48,0x89,0x58,0x10,0x48,0x89,0x70,0x18};
- if(std::memcmp(image+build::rva(0x137fd60),updateBytes,sizeof(updateBytes)))return false;
- result=MH_CreateHook(image+build::rva(0x137fd60),reinterpret_cast<void*>(&updateHands),reinterpret_cast<void**>(&originalUpdateHands));
- if(result!=MH_OK||MH_EnableHook(image+build::rva(0x137fd60))!=MH_OK)return false;
- constexpr unsigned char playBytes[]={0x41,0x54,0x41,0x55,0x41,0x56,0x48,0x81,0xec,0x90,0,0,0};
- constexpr unsigned char endBytes[]={0x48,0x89,0x5c,0x24,0x10,0x57,0x48,0x83,0xec,0x40};
- if(std::memcmp(image+build::rva(0x1390b50),playBytes,sizeof(playBytes))||std::memcmp(image+build::rva(0x1398420),endBytes,sizeof(endBytes)))return false;
- if(MH_CreateHook(image+build::rva(0x1390b50),reinterpret_cast<void*>(&playTraversal),reinterpret_cast<void**>(&originalPlayTraversal))!=MH_OK||
-    MH_CreateHook(image+build::rva(0x1398420),reinterpret_cast<void*>(&endBar),reinterpret_cast<void**>(&originalEndBar))!=MH_OK)return false;
- if(MH_EnableHook(image+build::rva(0x1398420))!=MH_OK||MH_EnableHook(image+build::rva(0x1390b50))!=MH_OK)return false;
- log("ETERNAL_MONKEYBAR skip=first-person-play-call native-completion=invalid-handle");
- if(!monkey::install(image))log("ETERNAL_MONKEYBAR HMD adapter unavailable: hook contract rejected");
- constexpr unsigned char waterBytes[]={0x48,0x89,0x74,0x24,0x20,0x57,0x48,0x81,0xec,0xf0,0,0,0};
- auto waterTarget=image+build::rva(0x53a9f0);bool waterOk=false;
- if(!std::memcmp(waterTarget,waterBytes,sizeof(waterBytes))&&
-    MH_CreateHook(waterTarget,reinterpret_cast<void*>(&waterMove),reinterpret_cast<void**>(&originalWaterMove))==MH_OK){
-  waterOk=MH_EnableHook(waterTarget)==MH_OK;if(!waterOk)MH_RemoveHook(waterTarget);
- }
- log("ETERNAL_SWIMMING installed="+std::to_string(waterOk)+" scope=native-water-move pitch=HMD yaw=existing-input");
- log("ETERNAL_PLAYER arms=authored-camera-only projection=world-xy movement=head-relative");
- if(MH_CreateHook(image+build::rva(0x13bc530),reinterpret_cast<void*>(&argentWallGateBridge),&argentWallGateResume)!=MH_OK||
-    MH_CreateHook(image+build::rva(0x13b98f8),reinterpret_cast<void*>(&argentWallImpulseBridge),&argentWallImpulseResume)!=MH_OK)return false;
- if(MH_EnableHook(image+build::rva(0x13bc530))!=MH_OK||MH_EnableHook(image+build::rva(0x13b98f8))!=MH_OK)return false;
- log("ETERNAL_WALLCLIMB installed=1 gate=HMD impulse=HMD-yaw-pitch launchBias=native");
- if(MH_CreateHook(image+build::rva(0x1389020),reinterpret_cast<void*>(&itemTransform),reinterpret_cast<void**>(&originalItemTransform))!=MH_OK||
-    MH_CreateHook(image+build::rva(0x1389910),reinterpret_cast<void*>(&throwItem),reinterpret_cast<void**>(&originalThrowItem))!=MH_OK)return false;
- if(MH_EnableHook(image+build::rva(0x1389020))!=MH_OK||MH_EnableHook(image+build::rva(0x1389910))!=MH_OK)return false;
- log("ETERNAL_EQUIPMENT installed=1 paths=joint-transform,throw,fire-info slots=5,6,9,10 pitch=HMD");
- result=MH_CreateHook(image+build::rva(0x135f280),reinterpret_cast<void*>(&fire),reinterpret_cast<void**>(&originalFire));
- const bool firing=result==MH_OK&&MH_EnableHook(image+build::rva(0x135f280))==MH_OK;
- log("ETERNAL_PLAYER hands=1 fire="+std::to_string(firing)+" physics=read-native-origin");return firing;
- }catch(...){return false;}}
+#include "PlayerHookInstallation.inc"
 }
 extern "C" bool argentWallClimbGate(void* mechanic,bool nativeBlocked) noexcept {try{
  using namespace argent;using namespace argent::player;
