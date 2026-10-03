@@ -164,6 +164,23 @@ void runCase(std::string_view scenario){
         rootVisibility(objects.hands.data(),objects.root.data(),false);arm(mode);rootVisibility(objects.hands.data(),objects.root.data(),true);disarm();
         check(get<uint64_t>(objects.root.data(),0x518)==0&&hideCalls==2,"Visibility diagnostic skipped native hiding");rootVisibility(objects.hands.data(),objects.root.data(),false);
         check(get<uint64_t>(objects.root.data(),0x518)==5&&showCalls==2,"Visibility diagnostic lost the native restore mask");
+    }else if(kind=="visibility-interleaved"||kind=="visibility-shared"){
+        std::array<unsigned char,0x600> second{};put(second.data(),0,uintptr_t(image.bytes)+0x1000);put(second.data(),0x518,uint64_t(9));
+        const auto otherHands=objects.owner.data();const auto otherRoot=kind=="visibility-shared"?objects.root.data():second.data();
+        rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(otherHands,otherRoot,true);
+        rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(otherHands,otherRoot,true);
+        rootVisibility(objects.hands.data(),objects.root.data(),false);rootVisibility(otherHands,otherRoot,false);
+        check(get<uint64_t>(objects.root.data(),0x518)==5&&get<uint64_t>(second.data(),0x518)==9,"Interleaved hands discarded a live root's saved visibility");
+    }else if(kind=="visibility-replaced-entity"||kind=="visibility-replaced-model"||kind=="visibility-invalid"){
+        rootVisibility(objects.hands.data(),objects.root.data(),true);
+        if(kind=="visibility-invalid"){
+            put(objects.root.data(),0,uintptr_t(1));rootVisibility(objects.hands.data(),objects.root.data(),false);
+            check(showCalls==0,"Rejected root identity still reached native visibility");put(objects.root.data(),0,uintptr_t(image.bytes)+0x1000);
+        }else put(objects.root.data(),kind=="visibility-replaced-entity"?0x4d8:0x4e0,uintptr_t(objects.decl.data()));
+        put(objects.root.data(),0x518,uint64_t(9));rootVisibility(objects.hands.data(),objects.root.data(),false);
+        check(get<uint64_t>(objects.root.data(),0x518)==9&&showCalls==0,"Replaced root inherited an earlier object's saved visibility");
+        rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(objects.hands.data(),objects.root.data(),false);
+        check(get<uint64_t>(objects.root.data(),0x518)==9&&showCalls==2,"Replaced root could not capture and restore its own mask");
     }else if(kind=="visibility-allocation"||kind=="visibility-reserve"||kind=="visibility-initialize"){
         if(kind=="visibility-initialize"){
             failAfter=1;bool escaped{};try{rootVisibility(objects.hands.data(),objects.root.data(),true);}catch(const std::bad_alloc&){escaped=true;}disarm();
@@ -236,7 +253,7 @@ int main(int argc,char** argv){
             for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate"})for(const auto mode:{L"normal",L"log",L"oom"}){
                 if(!timing&&std::wstring_view(mode)!=L"normal")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-"+mode,store,timing);
             }
-            for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"visibility-interleaved",L"visibility-shared",L"visibility-replaced-entity",L"visibility-replaced-model",L"visibility-invalid",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){disarm();std::cerr<<error.what()<<'\n';return 1;}

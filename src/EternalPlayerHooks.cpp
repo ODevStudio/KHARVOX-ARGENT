@@ -349,19 +349,20 @@ struct RootVisibilityRequest {void* root{};bool ready{};};
 thread_local std::array<RootVisibilityRequest,32> finalVisibility{};
 thread_local size_t finalVisibilityCount{};
 thread_local bool collectingVisibility{};
-void rootVisibility(void* hands,void* root,bool hide){
+void rootVisibility(void*,void* root,bool hide){
  // Roots come from the verified transform or reflected idHands/idHandsItem fields.
  // Arms stay hidden in VR; weapon roots are hidden only while awaiting their
  // first VR pose. Keep each root's original mask independently.
  static std::mutex guard;std::lock_guard<std::mutex> lock(guard);
- struct Mask {uint64_t saved{};bool held{};};
- static std::optional<std::map<uintptr_t,Mask>> storage;static uintptr_t savedHands{};
- if(savedHands!=uintptr_t(hands)){if(storage)storage->clear();savedHands=uintptr_t(hands);}
+ struct Mask {uint64_t saved{};std::array<uintptr_t,3> identity{};bool held{};};
+ static std::optional<std::map<uintptr_t,Mask>> storage;
  auto model=uintptr_t(root);
  // Native FindMesh reads render entity+4d8, HideMesh changes +518.
  // The animation-event receiver at +2a28 is not this UpdatePosition owner.
- if(!model||ptr(model)<uintptr_t(image)||ptr(model)>=uintptr_t(image)+0x5000000)return;
- int surfaceCount{};const bool countRead=read(ptr(model+0x4d8)+0x80,&surfaceCount,sizeof(surfaceCount));
+ std::array<uintptr_t,3> identity{};
+ if(!model||!read(model,identity.data(),sizeof(uintptr_t))||identity[0]<uintptr_t(image)||identity[0]>=uintptr_t(image)+0x5000000||
+    !read(model+0x4d8,identity.data()+1,2*sizeof(uintptr_t))){if(storage)storage->erase(model);return;}
+ int surfaceCount{};const bool countRead=read(identity[1]+0x80,&surfaceCount,sizeof(surfaceCount));
  static unsigned visibilityReport{};if(extendedLogging()&&hide&&visibilityReport++%600==0)try{log("ETERNAL_ARMS currentRoot=1 surfaces="+std::to_string(surfaceCount)+" readable="+std::to_string(countRead));}catch(...){}
  // Match KHARVOX: clear every bit of the native 64-bit mesh mask.
  // Material/surface counts are not the visibility-mask capacity.
@@ -370,9 +371,10 @@ void rootVisibility(void* hands,void* root,bool hide){
  if(!storage){if(!hide)return;try{storage.emplace();}catch(...){return;}}
  auto& masks=*storage;
  auto found=masks.find(model);
+ if(found!=masks.end()&&found->second.identity!=identity){masks.erase(found);found=masks.end();}
  if(found==masks.end()){
   if(!hide)return;
-  try{found=masks.try_emplace(model).first;}catch(...){return;}
+  try{found=masks.try_emplace(model,Mask{0,identity,false}).first;}catch(...){return;}
  }
  auto& mask=found->second;
  if(hide){if(!mask.held){mask.saved=visible;mask.held=true;}for(int i=0;i<surfaceCount;++i)if(visible&(uint64_t(1)<<i))reinterpret_cast<Surface>(image+build::rva(0x19cf620))(reinterpret_cast<void*>(model),i);++hidden;}
