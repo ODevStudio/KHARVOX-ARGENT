@@ -82,10 +82,21 @@ void __fastcall nativeAnimation(void* item,void* hands){
     check(animationItem==uintptr_t(item)&&animationHands==uintptr_t(hands),"Animation did not expose the current callback context");nativeFailure();
 }
 void* observedRoot{};
+void* nestedRoot{};
+bool nestedFailure{};
 void __fastcall nativeHands(void*){
     ++nativeCalls;using namespace argent::player;check(collectingVisibility,"Hands update did not collect native visibility requests");
     finalVisibility[finalVisibilityCount++]={observedRoot,false};nativeFailure();
 }
+void __fastcall nativeNestedHands(void* hands){
+    using namespace argent::player;++nativeCalls;
+    if(nativeCalls==2){finalVisibility[finalVisibilityCount++]={nestedRoot,false};if(nestedFailure)throw std::bad_alloc{};return;}
+    finalVisibility[finalVisibilityCount++]={observedRoot,false};bool escaped{};
+    try{updateHands(hands);}catch(const std::bad_alloc&){escaped=true;}
+    check(escaped==nestedFailure&&collectingVisibility&&finalVisibilityCount==1&&finalVisibility[0].root==observedRoot,"Nested hands update replaced its caller's visibility requests");
+}
+short* __fastcall nativeFindJoint(void*,short* joint,const char*){*joint=0;return joint;}
+bool __fastcall nativeJoint(void*,void*,int,unsigned short,float* origin,float* axis){std::memset(origin,0,3*sizeof(float));std::memcpy(axis,headBasis.data(),sizeof(headBasis));return true;}
 void __fastcall nativeHide(void* root,int surface){++hideCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask&~(uint64_t(1)<<surface));}
 void __fastcall nativeShow(void* root,int surface){++showCalls;const auto mask=get<uint64_t>(root,0x518);put(root,0x518,mask|(uint64_t(1)<<surface));}
 bool __fastcall nativeTransform(void*,void*,float* origin,float* axis){++nativeCalls;nativeFailure();const float position[]{4,5,6};std::memcpy(origin,position,sizeof(position));std::memset(axis,0,9*sizeof(float));return true;}
@@ -153,6 +164,44 @@ void runCase(std::string_view scenario){
         rootVisibility(objects.hands.data(),objects.root.data(),false);arm(mode);rootVisibility(objects.hands.data(),objects.root.data(),true);disarm();
         check(get<uint64_t>(objects.root.data(),0x518)==0&&hideCalls==2,"Visibility diagnostic skipped native hiding");rootVisibility(objects.hands.data(),objects.root.data(),false);
         check(get<uint64_t>(objects.root.data(),0x518)==5&&showCalls==2,"Visibility diagnostic lost the native restore mask");
+    }else if(kind=="visibility-allocation"||kind=="visibility-reserve"||kind=="visibility-initialize"){
+        if(kind=="visibility-initialize"){
+            failAfter=1;bool escaped{};try{rootVisibility(objects.hands.data(),objects.root.data(),true);}catch(const std::bad_alloc&){escaped=true;}disarm();
+            check(!escaped&&allocationFailures==1&&hideCalls==0&&get<uint64_t>(objects.root.data(),0x518)==5,"Initial mask-map allocation modified a root or escaped");
+            rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(objects.hands.data(),objects.root.data(),false);
+            check(get<uint64_t>(objects.root.data(),0x518)==5&&showCalls==2,"Initial mask-map allocation could not retry");
+        }else if(kind=="visibility-allocation"){
+            failAfter=1;bool escaped{};try{rootVisibility(objects.hands.data(),objects.root.data(),false);}catch(const std::bad_alloc&){escaped=true;}disarm();
+            check(!escaped&&allocationFailures==0&&get<uint64_t>(objects.root.data(),0x518)==5,"Showing an untracked root allocated or escaped");
+        }else{
+            rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(objects.hands.data(),objects.root.data(),false);
+            std::array<unsigned char,0x600> second{};put(second.data(),0,uintptr_t(image.bytes)+0x1000);put(second.data(),0x518,uint64_t(9));
+            const auto initialHides=hideCalls;failAfter=1;bool escaped{};try{rootVisibility(objects.hands.data(),second.data(),true);}catch(const std::bad_alloc&){escaped=true;}disarm();
+            check(!escaped&&allocationFailures==1&&hideCalls==initialHides&&get<uint64_t>(second.data(),0x518)==9,"Failed mask reservation modified an untracked root or escaped");
+            rootVisibility(objects.hands.data(),second.data(),true);rootVisibility(objects.hands.data(),second.data(),false);
+            check(get<uint64_t>(second.data(),0x518)==9,"Mask reservation could not retry and restore");
+        }
+    }else if(kind=="nested"||kind=="nested-native"){
+        presentation::scriptedMovement=true;std::array<unsigned char,0x600> second{};nestedRoot=second.data();nestedFailure=kind=="nested-native";
+        put(second.data(),0,uintptr_t(image.bytes)+0x1000);put(second.data(),0x518,uint64_t(9));
+        rootVisibility(objects.hands.data(),objects.root.data(),true);rootVisibility(objects.hands.data(),second.data(),true);
+        originalUpdateHands=&nativeNestedHands;updateHands(objects.hands.data());
+        check(nativeCalls==2&&!collectingVisibility&&finalVisibilityCount==1&&finalVisibility[0].root==observedRoot&&get<uint64_t>(objects.root.data(),0x518)==5,"Nested hands update lost outer visibility recovery");
+    }else if(kind=="idle-allocation"){
+        std::array<unsigned char,0x400> model{},definition{},node{},skeleton{};
+        put(objects.root.data(),0x4e0,uintptr_t(model.data()));put(model.data(),8,uintptr_t(definition.data()));put(definition.data(),0x80,uintptr_t(node.data()));put(node.data(),0x310,uintptr_t(skeleton.data()));
+        std::memcpy(objects.root.data()+0x164,headBasis.data(),sizeof(headBasis));image.stub(0x19bfe00,&nativeFindJoint);image.stub(0x1981990,&nativeJoint);
+        presentation::gameplayInput=true;input::state.active=true;input::state.tick=10000;input::state.weaponValid=true;input::state.weapon.position={1,2,3};input::state.weaponPivot={};
+        collectingVisibility=true;placedHands=uintptr_t(objects.hands.data());placedTick=1;failAfter=1;
+        argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);disarm();
+        check(allocationFailures==1&&origin[0]==1&&origin[1]==2&&origin[2]==3&&placedTick==10000&&finalVisibilityCount==1&&finalVisibility[0].ready,"Idle cache allocation interrupted completed placement bookkeeping");
+        argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);input::state.weaponValid=false;origin[0]=99;
+        argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);
+        check(origin[0]==1&&placedTick==10000&&finalVisibilityCount==3&&finalVisibility[2].ready,"Idle cache retry did not preserve an untracked weapon pose");
+        presentation::scriptedMovement=true;failAfter=1;origin[0]=99;argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);disarm();
+        check(allocationFailures==1&&origin[0]==99&&placedTick==0&&!finalVisibility[3].ready,"Authored animation retained the idle pose or allocated a new entry");
+        presentation::scriptedMovement=false;origin[0]=99;argentHandsTransform(objects.hands.data(),objects.root.data(),origin,axis);
+        check(origin[0]==99&&!finalVisibility[4].ready,"Gameplay reused an idle pose across authored animation");
     }else if(kind=="transform"||kind=="throw"||kind=="fire"){
         arm(mode);
         if(kind=="transform")check(itemTransform(objects.item.data(),objects.hands.data(),origin,axis),"Transform diagnostic changed native success");
@@ -187,7 +236,7 @@ int main(int argc,char** argv){
             for(const auto kind:{L"crucible0",L"crucible1",L"crucible2",L"water",L"hands",L"haptic",L"visibility",L"transform",L"throw",L"fire",L"target",L"candidate"})for(const auto mode:{L"normal",L"log",L"oom"}){
                 if(!timing&&std::wstring_view(mode)!=L"normal")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-"+mode,store,timing);
             }
-            for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native"}){++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
+            for(const auto kind:{L"animation",L"water-native",L"animation-native",L"hands-native",L"visibility-allocation",L"visibility-reserve",L"visibility-initialize",L"nested",L"nested-native",L"idle-allocation"}){if(timing&&std::wstring_view(kind)==L"visibility-initialize")continue;++cases;failures+=!child(executable,std::wstring(kind)+L"-normal",store,timing);}
         }
         std::cout<<cases<<" production player callback scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){disarm();std::cerr<<error.what()<<'\n';return 1;}

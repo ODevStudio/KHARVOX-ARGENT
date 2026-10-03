@@ -27,6 +27,7 @@
 #include <atomic>
 #include <mutex>
 #include <map>
+#include <optional>
 extern "C" {void* argentHandsResume{};void argentHandsBridge();}
 extern "C" {void* argentMeathookResume{};void argentMeathookBridge();}
 extern "C" {void* argentMeathookGateResume{};void argentMeathookGateBridge();}
@@ -354,8 +355,8 @@ void rootVisibility(void* hands,void* root,bool hide){
  // first VR pose. Keep each root's original mask independently.
  static std::mutex guard;std::lock_guard<std::mutex> lock(guard);
  struct Mask {uint64_t saved{};bool held{};};
- static std::map<uintptr_t,Mask> masks;static uintptr_t savedHands{};
- if(savedHands!=uintptr_t(hands)){masks.clear();savedHands=uintptr_t(hands);}
+ static std::optional<std::map<uintptr_t,Mask>> storage;static uintptr_t savedHands{};
+ if(savedHands!=uintptr_t(hands)){if(storage)storage->clear();savedHands=uintptr_t(hands);}
  auto model=uintptr_t(root);
  // Native FindMesh reads render entity+4d8, HideMesh changes +518.
  // The animation-event receiver at +2a28 is not this UpdatePosition owner.
@@ -366,9 +367,16 @@ void rootVisibility(void* hands,void* root,bool hide){
  // Material/surface counts are not the visibility-mask capacity.
  surfaceCount=64;
  uint64_t visible{};if(!read(model+0x518,&visible,sizeof(visible)))return;
- auto& mask=masks[model];
+ if(!storage){if(!hide)return;try{storage.emplace();}catch(...){return;}}
+ auto& masks=*storage;
+ auto found=masks.find(model);
+ if(found==masks.end()){
+  if(!hide)return;
+  try{found=masks.try_emplace(model).first;}catch(...){return;}
+ }
+ auto& mask=found->second;
  if(hide){if(!mask.held){mask.saved=visible;mask.held=true;}for(int i=0;i<surfaceCount;++i)if(visible&(uint64_t(1)<<i))reinterpret_cast<Surface>(image+build::rva(0x19cf620))(reinterpret_cast<void*>(model),i);++hidden;}
- else if(mask.held){for(int i=0;i<surfaceCount;++i)if(mask.saved&(uint64_t(1)<<i))reinterpret_cast<Surface>(image+build::rva(0x19d0340))(reinterpret_cast<void*>(model),i);mask.held=false;}
+ else if(mask.held){for(int i=0;i<surfaceCount;++i)if(mask.saved&(uint64_t(1)<<i))reinterpret_cast<Surface>(image+build::rva(0x19d0340))(reinterpret_cast<void*>(model),i);masks.erase(found);}
 }
 int equipmentItemSlot(void* item){
  int slot{},declSlot{};const auto definition=ptr(uintptr_t(item)+8);
@@ -552,6 +560,12 @@ void __fastcall updateItemAnimation(void* item,void* hands){
  }
 }
 void __fastcall updateHands(void* hands){
+ struct RestoreVisibility {
+  const bool collecting=collectingVisibility;const size_t count=finalVisibilityCount;std::array<RootVisibilityRequest,32> pending;
+  RestoreVisibility(){if(collecting)pending=finalVisibility;}
+  ~RestoreVisibility(){collectingVisibility=collecting;if(collecting){finalVisibility=pending;finalVisibilityCount=count;}}
+ } restoreVisibility;
+ collectingVisibility=false;
  camera::publishLaser(nullptr,nullptr,nullptr);
  if(revenant::refresh(presentation::player.load(),presentation::playerVtable.load())){originalUpdateHands(hands);return;}
  uintptr_t ownerNow{};XrVector3f foot{};
@@ -588,11 +602,9 @@ void __fastcall updateHands(void* hands){
     try{log("ETERNAL_PRECISION_BOLT nativeShow=1 phase=before-position freshController=1");}catch(...){} }
   }
  }
- finalVisibilityCount=0;
- {
-  struct RestoreCollection {const bool previous;~RestoreCollection(){collectingVisibility=previous;}} restore{collectingVisibility};
-  collectingVisibility=true;originalUpdateHands(hands);
- }
+ finalVisibilityCount=0;collectingVisibility=true;
+ originalUpdateHands(hands);
+ collectingVisibility=false;
  updateHapticWeapon(hands);
  // UpdatePosition can change mesh visibility after the transform callback.
  // Enforce the handoff mask once native updates have finished.
@@ -763,11 +775,14 @@ extern "C" void argentHandsTransform(void* hands,void* root,float* origin,float*
   local[2]+=sample.weaponPivot.z*camera::unitsPerMeter();
   for(int k=0;k<3;++k){origin[k]=hand[k];for(int r=0;r<3;++r)origin[k]-=local[r]*desired[r*3+k];}std::memcpy(axis,desired,sizeof(desired));input::weaponApplied(sample);++placed;}
  const auto context=camera::weaponContext();
- static std::mutex idleGuard;static std::map<uintptr_t,WeaponIdlePose> idle;static uintptr_t savedOwner{};static uint64_t savedContext{};
- {std::lock_guard<std::mutex> lock(idleGuard);
-  if(owner!=savedOwner||context!=savedContext||!presentation::gameplayInput.load()||idle.size()>32){idle.clear();savedOwner=owner;savedContext=context;}
-  ready=idle[uintptr_t(root)].apply(owner,uintptr_t(hands),uintptr_t(root),context&&presentation::gameplayInput.load()&&!nativeAnimation,ready,origin,axis,ptr(uintptr_t(hands)+0x29b0+0x38));
- }
+ const bool gameplay=presentation::gameplayInput.load(),cacheActive=context&&gameplay&&!nativeAnimation;
+ static std::mutex idleGuard;static uintptr_t savedOwner{};static uint64_t savedContext{};
+ try{std::lock_guard<std::mutex> lock(idleGuard);
+  static std::map<uintptr_t,WeaponIdlePose> idle;
+  if(owner!=savedOwner||context!=savedContext||!gameplay||idle.size()>32){idle.clear();savedOwner=owner;savedContext=context;}
+  if(cacheActive)ready=idle[uintptr_t(root)].apply(owner,uintptr_t(hands),uintptr_t(root),true,ready,origin,axis,ptr(uintptr_t(hands)+0x29b0+0x38));
+  else{idle.erase(uintptr_t(root));ready=false;}
+ }catch(...){ready=ready&&cacheActive;}
  if(ready){placedHands=uintptr_t(hands);placedTick=GetTickCount64();}else if(placedHands.load()==uintptr_t(hands)){placedHands=0;placedTick=0;}
  const bool vrRequested=presentation::worldPresentation.load()||presentation::gameplayInput.load();
  if(collectingVisibility&&finalVisibilityCount<finalVisibility.size())finalVisibility[finalVisibilityCount++]={root,ready};
