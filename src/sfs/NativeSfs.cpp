@@ -2,7 +2,6 @@
 #include "../openxr/GameImageLifetime.h"
 #include "../hands/HandSceneDepthTracker.h"
 #include "../QuadRuntime.h"
-#include "../PoolMembers.h"
 #include "NativeDispatch.h"
 #include "SourceRing.h"
 #include "PushReplay.h"
@@ -149,8 +148,6 @@ struct State : std::enable_shared_from_this<State> {
     uint32_t materialDiagnostics{};
     uint32_t materialCaptureCount{};
     std::unordered_map<VkDescriptorSetLayout,uint32_t> dynamicCounts;
-    std::unordered_map<VkDescriptorSet,uint32_t> setDynamicCounts;
-    argent::PoolMembers<VkDescriptorPool,VkDescriptorSet> setPools;
     std::unordered_map<VkCommandBuffer,CommandState> commands;
     std::unordered_map<VkCommandBuffer,VkCommandPool> commandPools;
     std::filesystem::path profile;
@@ -233,27 +230,7 @@ void registerMarker(State* s,VkPipeline pipeline,std::string label){
 #include "CompiledShaders.inc"
 #include "CoreResources.inc"
 #include "MetadataResources.inc"
-VKAPI_ATTR VkResult VKAPI_CALL allocateSets(VkDevice d,const VkDescriptorSetAllocateInfo* i,VkDescriptorSet* out){RESULT_BEGIN
-    auto r=FN(vkAllocateDescriptorSets)(d,i,out);if(r!=VK_SUCCESS)return r;
-    if(s->waterCapture)s->waterCapture->allocateSets(*i,out);
-    VkDescriptorBufferInfo buffer{s->params,0,sizeof(EyeUniforms)};
-    std::vector<VkWriteDescriptorSet> writes(size_t(i->descriptorSetCount));
-    for(uint32_t j=0;j<i->descriptorSetCount;++j){s->setPools.insert(i->descriptorPool,out[j]);s->setDynamicCounts[out[j]]=s->dynamicCounts.at(i->pSetLayouts[j]);for(uint32_t k=0;k<1;++k){auto& w=writes[size_t(j)];w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=out[j];w.dstBinding=s->layoutBindings.at(i->pSetLayouts[j]);w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;w.pBufferInfo=&buffer;}}
-    FN(vkUpdateDescriptorSets)(d,uint32_t(writes.size()),writes.data(),0,nullptr);return VK_SUCCESS;
-RESULT_END}
-void forgetPool(State* s,VkDescriptorPool pool){
-    if(s->waterCapture)s->waterCapture->pool(pool);
-    s->setPools.retire(pool,[&](VkDescriptorSet set){s->setDynamicCounts.erase(set);});
-}
-VKAPI_ATTR VkResult VKAPI_CALL freeSets(VkDevice d,VkDescriptorPool pool,uint32_t count,const VkDescriptorSet* sets){RESULT_BEGIN
-    auto r=FN(vkFreeDescriptorSets)(d,pool,count,sets);if(r==VK_SUCCESS){if(s->waterCapture)s->waterCapture->freeSets(count,sets);for(uint32_t i=0;i<count;++i){s->setDynamicCounts.erase(sets[i]);s->setPools.erase(sets[i]);}}return r;
-RESULT_END}
-VKAPI_ATTR VkResult VKAPI_CALL resetPool(VkDevice d,VkDescriptorPool pool,VkDescriptorPoolResetFlags flags){RESULT_BEGIN
-    auto r=FN(vkResetDescriptorPool)(d,pool,flags);if(r==VK_SUCCESS)forgetPool(s,pool);return r;
-RESULT_END}
-VKAPI_ATTR void VKAPI_CALL destroyPool(VkDevice d,VkDescriptorPool pool,const VkAllocationCallbacks* allocator){
-    auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);forgetPool(s,pool);FN(vkDestroyDescriptorPool)(d,pool,allocator);
-}
+#include "DescriptorAllocation.inc"
 #include "PipelineCreation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL beginCommand(VkCommandBuffer cb,const VkCommandBufferBeginInfo* i){try{auto s=state(cb);std::shared_lock<std::shared_mutex> lock(s->mutex);if(i->pInheritanceInfo&&i->pInheritanceInfo->renderPass)return VK_ERROR_FEATURE_NOT_PRESENT;auto& command=commandUnderLock(s,cb);command.stereo=false;command.compute=VK_NULL_HANDLE;command.graphics=VK_NULL_HANDLE;command.graphicsInfo={};command.computeInfo={};for(auto& descriptor:command.descriptors)descriptor.set=VK_NULL_HANDLE;for(auto& descriptor:command.computeDescriptors)descriptor.set=VK_NULL_HANDLE;command.queryCopies=0;command.bindings.clear();command.pushes.clear();
     // We already resolved the command under the lock. Prime the recording
@@ -280,12 +257,7 @@ VKAPI_ATTR VkResult VKAPI_CALL endCommand(VkCommandBuffer cb){try{auto s=state(c
     if(!argent::cleanRelease&&c.census){if(result==VK_SUCCESS)s->census.finish(*c.census);else c.census->active=false;}
     if(result!=VK_SUCCESS){c.gpu.recorded=false;if(s->waterCapture)s->waterCapture->reset(cb);}return result;
 }catch(const std::exception& e){note(e.what());return VK_ERROR_INITIALIZATION_FAILED;}}
-VKAPI_ATTR VkResult VKAPI_CALL createCommandPool(VkDevice d,const VkCommandPoolCreateInfo* info,const VkAllocationCallbacks* a,VkCommandPool* out){RESULT_BEGIN
-    const auto result=FN(vkCreateCommandPool)(d,info,a,out);if(result==VK_SUCCESS)s->poolFamilies[*out]=info->queueFamilyIndex;return result;
-RESULT_END}
-VKAPI_ATTR VkResult VKAPI_CALL allocateCommands(VkDevice d,const VkCommandBufferAllocateInfo* i,VkCommandBuffer* out){RESULT_BEGIN
-    auto r=FN(vkAllocateCommandBuffers)(d,i,out);if(r==VK_SUCCESS)for(uint32_t j=0;j<i->commandBufferCount;++j){s->commandPools[out[j]]=i->commandPool;auto& c=s->commands.try_emplace(out[j]).first->second;c.primary=i->level==VK_COMMAND_BUFFER_LEVEL_PRIMARY;const auto f=s->poolFamilies.find(i->commandPool);if(f!=s->poolFamilies.end())c.family=f->second;}return r;
-RESULT_END}
+#include "CommandAllocation.inc"
 VKAPI_ATTR VkResult VKAPI_CALL captureResetCommand(VkCommandBuffer cb,VkCommandBufferResetFlags flags){auto s=state(cb);auto r=reinterpret_cast<PFN_vkResetCommandBuffer>(s->resolver(s->device,"vkResetCommandBuffer"))(cb,flags);if(r==VK_SUCCESS&&s->waterCapture)s->waterCapture->reset(cb);return r;}
 VKAPI_ATTR VkResult VKAPI_CALL captureResetPool(VkDevice d,VkCommandPool pool,VkCommandPoolResetFlags flags){auto s=state(d);auto r=reinterpret_cast<PFN_vkResetCommandPool>(s->resolver(d,"vkResetCommandPool"))(d,pool,flags);if(r==VK_SUCCESS&&s->waterCapture){std::shared_lock<std::shared_mutex> lock(s->mutex);for(const auto& c:s->commandPools)if(c.second==pool)s->waterCapture->reset(c.first);}return r;}
 VKAPI_ATTR void VKAPI_CALL freeCommands(VkDevice d,VkCommandPool pool,uint32_t count,const VkCommandBuffer* commands){auto s=state(d);std::unique_lock<std::shared_mutex> lock(s->mutex);s->commandRetirement.fetch_add(1,std::memory_order_release);for(uint32_t j=0;j<count;++j){if(s->waterCapture)s->waterCapture->reset(commands[j]);s->commands.at(commands[j]).gpu.shutdownAfterCompletion();s->commands.erase(commands[j]);s->commandPools.erase(commands[j]);}FN(vkFreeCommandBuffers)(d,pool,count,commands);}
