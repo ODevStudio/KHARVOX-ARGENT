@@ -8,6 +8,7 @@
 | `6e096e4` | Stability | Preserve native callback results and restore temporary player state. |
 | `cda8d14` | Stability | Preserve placement bookkeeping and nested visibility through cache failures. |
 | `506e343` | Stability | Retain per-root masks across interleaved hands and invalidate observed native identity changes. |
+| `c17eccb` | Stability | Honor the native attachment boolean result and share calibration/rest-pose presentation eligibility. |
 
 ## Callback Findings
 
@@ -62,8 +63,8 @@ The callback restoration and diagnostic guards add no GPU waits.
 
 Interleaved and shared-root mask ownership now has controlled fixture coverage.
 Root destruction and identical-identity address reuse still need native lifecycle
-evidence. The current fixture does not
-comprehensively execute attachment/rest-pose or precision-bolt branches.
+evidence. Attachment calibration and crucible rest-pose callbacks have controlled
+coverage; hammer identity, native locators and precision-bolt branches remain.
 Native game/headset callbacks, broader context changes and DLL unload remain
 unverified. Controller state/rumble setup is recorded in
 [the IAT ownership audit](XINPUT_IAT_OWNERSHIP_AUDIT.md); native coexistence remains pending.
@@ -128,3 +129,48 @@ destroyed roots that never restore can remain until that address is observed
 again; cleanup requires verified native lifecycle evidence rather than silently
 discarding live restore ownership. Native destruction, complete cache retirement
 and game/headset transitions remain unverified.
+
+## Attachment Outcomes and Presentation
+
+The hook declared the native locator helper's return as `uintptr_t` and applied
+calibration without checking native success. A failed joint query could therefore
+modify unproduced output and consume visual rest-pose state. Undefined upper
+return-register bits could also make a native false value appear successful.
+
+Read-only disassembly of the installed Steam image establishes the ABI:
+RVA `0x1981bc0` calls `0x19819d0`; the latter tests `AL` at `0x1981a8b`, returns
+immediately on failure and writes `AL=1` at `0x1981bb1` after successful output.
+The attachment caller at `0x138a649` matches the hook's verified return address
+`0x138a64e`. The hook and trampoline type now return `bool`. Native false returns
+before observer reads, native state queries or output/cache changes. Native
+exceptions still propagate.
+
+Calibration previously checked pose/placement freshness but not current camera
+ownership. A fresh preceding VR pose could alter an authored attachment after
+gameplay ended or an animation took ownership. Calibration and rest-pose
+replacement now share the existing native-camera, scripted/drone/monkey-bar,
+context, primary-root, weapon-profile and pose/placement eligibility checks.
+No native state, event, damage or parent-root transform is replaced.
+
+The first attachment fixture used exact equality for computed float transforms.
+Eight successful calibration cases were false failures; those computed outputs
+now use a `0.0001` tolerance. The repaired baseline reproduces twelve real
+failures in 218 cases: native false, false with nonzero upper register bits and
+failed attachment after actual rest-pose capture. After the ABI/result fix,
+six additional presentation scenarios reproduce 24 failures in 242 cases.
+
+All 242 final cases pass across Steam/Store profiles and timing modes. The
+fixture drives the production callback, settled idle capture, native swing
+events and controller-relative rest replacement. It also checks changed context,
+manual trigger, native exceptions, calibration diagnostic/formatting failures,
+foreign caller/owner/item/root, stale pose/placement and profile mismatch.
+Failure stubs emulate the native `AL` ABI without assuming cleared upper bits.
+Six focused player/caller checks pass in 9.31 seconds; the complete 123-check
+suite passes in 106.19 seconds. The production player source compiles, and raw
+diffs and diagnostics were inspected.
+
+There are no added GPU waits or claimed FPS gains. This fixture does not execute
+the real native locator resolver, actual hammer RTTI or precision-bolt show and
+render publication. Native disassembly evidence is from Steam, not a Store
+installation. Full game/headset transitions and complete root-cache lifecycle
+remain unverified.
