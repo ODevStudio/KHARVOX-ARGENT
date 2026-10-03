@@ -214,3 +214,35 @@ follows. Seven focused checks pass in 10.02 seconds, the production player sourc
 compiles, and all 123 harness checks pass in 107.06 seconds. Raw diffs, relevant
 diagnostics and both benchmark outputs were inspected. Native gameplay and
 concurrent game-object lifetime remain outside this fixture.
+
+## Zoom and Precision Bolt Publication
+
+Zoom preparation cleared cached hands/weapons but left the preceding publication
+timestamp active after inactive setup, meathook exclusion or a declaration
+fault. A blend fault after publication also left an active timestamp. Preparation
+now clears the timestamp both at entry and in the existing SEH rollback.
+
+The shared zoom gate requires a nonzero fresh timestamp, a nonzero camera
+context and no scripted movement or monkey-bar ownership alongside its existing
+gameplay, synchronization, native-animation and drone gates. Ineligible blend
+and mode callbacks retain their native arguments/results and dispatch counts.
+
+Precision Bolt detection previously reused its published weapon after the
+current primary handle changed or became invalid. It now reuses the established
+generation/cached-generation, invalid-sentinel and cached-pointer checks before
+calling the native declaration getter. Rejected handles never invoke that getter.
+The selected native mode and exact terminated declaration name remain required.
+
+The expanded baseline reproduces 48 failures in 362 cases across Steam/Store and
+timing/quiet variants. All 362 fixed cases pass, covering failed/inactive
+preparation, post-publication blend SEH, context eligibility, generation/pointer
+changes and native declaration/mode/name refusal. Owned RX stubs exercise child
+render publication only after native item animation, restored animation context,
+diagnostic/formatting failures and propagated native publication exceptions.
+
+Six focused checks pass in 13.81 seconds; the complete 123-check suite passes in
+108.28 seconds. The fixture and production player source compile; raw diffs and
+relevant diagnostics were inspected. This is stability work without a claimed
+FPS improvement or additional GPU wait. Actual engine resolvers, render-world
+publication, Store disassembly and complete root/game/headset lifecycle remain
+unverified.
