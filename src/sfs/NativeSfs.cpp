@@ -771,9 +771,9 @@ bool nativeProbeEnabled(){static const bool enabled=[] {char value[8]{};return G
 void waterCaptureSubmitted(VkDevice d,VkQueue q,uint32_t n,const VkCommandBuffer* cb){try{auto s=state(d);if(s->waterCapture){s->waterCapture->submitted(q,n,cb);s->waterCapture->poll();}}catch(const std::exception& e){note(std::string("WATER_GPU_CAPTURE error: ")+e.what());}}
 bool initialize(VkDevice d,VkPhysicalDevice physical,PFN_vkGetDeviceProcAddr gdpa,const VkPhysicalDeviceMemoryProperties& memory,const Configuration& configuration){
     if(!nativeProbeEnabled())return true;
-    auto s=std::make_shared<State>();
-    try{s->device=d;s->resolver=gdpa;s->configuration=configuration;s->dispatch.load(d,gdpa);
-        auto captureRoot=WaterGpuCapture::requestedRoot();if(!captureRoot.empty()){s->waterCapture=std::make_unique<WaterGpuCapture>(d,gdpa,memory,captureRoot,note,WaterGpuCapture::shadingShader,true);note("WATER_GPU_CAPTURE target=geometry-shading-and-scene snapshots=9");}
+    std::shared_ptr<State> s;
+    try{s=std::make_shared<State>();s->device=d;s->resolver=gdpa;s->configuration=configuration;s->dispatch.load(d,gdpa);
+        auto captureRoot=WaterGpuCapture::requestedRoot();if(!captureRoot.empty()){s->waterCapture=std::make_unique<WaterGpuCapture>(d,gdpa,memory,captureRoot,note,WaterGpuCapture::shadingShader,true);try{note("WATER_GPU_CAPTURE target=geometry-shading-and-scene snapshots=9");}catch(...){}}
         // Queue families are supplied by configurePerformanceGpu before recording.
 
         s->queryResolver=std::make_unique<QueryResolvePipeline>();s->queryResolver->initialize(d,s->dispatch,memory);
@@ -782,8 +782,11 @@ bool initialize(VkDevice d,VkPhysicalDevice physical,PFN_vkGetDeviceProcAddr gdp
         VkMemoryRequirements r{};FN(vkGetBufferMemoryRequirements)(d,s->params,&r);uint32_t index=UINT32_MAX;for(uint32_t j=0;j<memory.memoryTypeCount;++j)if((r.memoryTypeBits&(1u<<j))&&(memory.memoryTypes[j].propertyFlags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){index=j;break;}
         if(index==UINT32_MAX)throw std::runtime_error("No coherent SFS parameter memory");VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=r.size;ai.memoryTypeIndex=index;if(FN(vkAllocateMemory)(d,&ai,nullptr,&s->paramsMemory)!=VK_SUCCESS)throw std::runtime_error("SFS parameter allocation failed");if(FN(vkBindBufferMemory)(d,s->params,s->paramsMemory,0)!=VK_SUCCESS)throw std::runtime_error("SFS parameter bind failed");
         void* mapped{};if(FN(vkMapMemory)(d,s->paramsMemory,0,sizeof(EyeUniforms),0,&mapped)!=VK_SUCCESS)throw std::runtime_error("SFS parameter map failed");s->paramsMapped=mapped;const EyeUniforms initial{{identity(),identity()},{}};std::memcpy(s->paramsMapped,&initial,sizeof(initial));
-        {std::lock_guard<std::mutex> lock(devicesMutex);devices[dispatchKey(d)]=s;deviceGeneration.fetch_add(1,std::memory_order_release);}note(vrEnabled()?"native SFS experimental OpenXR producer initialized":"native multiview probe initialized; fixed identity projection; NOT VR");return true;
-    }catch(const std::exception& e){note(e.what());if(s->paramsMapped)FN(vkUnmapMemory)(d,s->paramsMemory);if(s->params)FN(vkDestroyBuffer)(d,s->params,nullptr);if(s->paramsMemory)FN(vkFreeMemory)(d,s->paramsMemory,nullptr);return false;}
+        {std::lock_guard<std::mutex> lock(devicesMutex);devices[dispatchKey(d)]=s;deviceGeneration.fetch_add(1,std::memory_order_release);}try{note(vrEnabled()?"native SFS experimental OpenXR producer initialized":"native multiview probe initialized; fixed identity projection; NOT VR");}catch(...){}return true;
+    }catch(const std::exception& e){
+        if(s){if(s->paramsMapped)FN(vkUnmapMemory)(d,s->paramsMemory);if(s->params)FN(vkDestroyBuffer)(d,s->params,nullptr);if(s->paramsMemory)FN(vkFreeMemory)(d,s->paramsMemory,nullptr);}
+        s.reset();try{note(e.what());}catch(...){}return false;
+    }
 }
 void shutdown(VkDevice d){if(!nativeProbeEnabled())return;std::shared_ptr<State> s;try{s=state(d)->shared_from_this();}catch(const std::exception&){return;}std::unique_lock<std::shared_mutex> lock(s->mutex);if(FN(vkDeviceWaitIdle)(d)!=VK_SUCCESS)commandFailure("SFS shutdown retirement failed");if(s->waterCapture){s->waterCapture->poll(false);s->waterCapture->shutdown();}for(auto& c:s->commands)c.second.gpu.shutdownAfterCompletion();handDepth::handSceneDeviceDestroyed();s->commandRetirement.fetch_add(1,std::memory_order_release);s->commands.clear();s->queryResolver.reset();if(s->sources)s->sources->clearAfterDeviceIdle();for(auto& entry:s->eyeViews)for(auto eye:entry.second)if(eye)FN(vkDestroyImageView)(d,eye,nullptr);s->eyeViews.clear();for(auto& module:s->compiled)FN(vkDestroyShaderModule)(d,module.second,nullptr);FN(vkUnmapMemory)(d,s->paramsMemory);FN(vkDestroyBuffer)(d,s->params,nullptr);FN(vkFreeMemory)(d,s->paramsMemory,nullptr);std::lock_guard<std::mutex> devicesLock(devicesMutex);for(auto it=devices.begin();it!=devices.end();)if(it->second==s)it=devices.erase(it);else ++it;deviceGeneration.fetch_add(1,std::memory_order_release);}
 bool vrEnabled(){static const bool enabled=[] {char value[8]{};return GetEnvironmentVariableA("ARGENT_SFS_NATIVE_VR",value,8)==1&&value[0]=='1';}();return nativeProbeEnabled()&&enabled;}
