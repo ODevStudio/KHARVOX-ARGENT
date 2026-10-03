@@ -40,8 +40,10 @@ public:
     }
     VkResult create(VkDevice device, const VkImageCreateInfo& input,
                     const VkAllocationCallbacks* allocator, VkImage* output,
-                    PFN_vkCreateImage next) {
-        if(!output||!next)return VK_ERROR_INITIALIZATION_FAILED;
+                    PFN_vkCreateImage next,PFN_vkDestroyImage rollback) {
+        if(!output)return VK_ERROR_INITIALIZATION_FAILED;
+        *output=VK_NULL_HANDLE;
+        if(!next||!rollback)return VK_ERROR_INITIALIZATION_FAILED;
         const bool stereo=stereoImage(input);
         if(stereo && input.initialLayout!=VK_IMAGE_LAYOUT_UNDEFINED)
             return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -49,7 +51,9 @@ public:
         VkImage image{};
         const auto result=next(device,&info,allocator,&image);
         if(result!=VK_SUCCESS)return result;
-        { std::unique_lock<std::shared_mutex> lock(mutex_); layers_[image]=stereo?2:1; }
+        if(!image)return VK_ERROR_INITIALIZATION_FAILED;
+        try{std::unique_lock<std::shared_mutex> lock(mutex_);layers_[image]=stereo?2:1;}
+        catch(...){rollback(device,image,allocator);throw;}
         *output=image;
         return result;
     }

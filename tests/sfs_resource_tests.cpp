@@ -25,7 +25,7 @@ int main(){try{
     info.imageType=VK_IMAGE_TYPE_3D;check(!stereoImage(info));
     info.imageType=VK_IMAGE_TYPE_2D;info.arrayLayers=6;check(!stereoImage(info));
     info.arrayLayers=1;Images images;VkImage image{};
-    check(images.create({},info,nullptr,&image,createImage)==VK_SUCCESS);
+    check(images.create({},info,nullptr,&image,createImage,destroyImage)==VK_SUCCESS);
     check(received.arrayLayers==2);
     VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     view.image=image;view.viewType=VK_IMAGE_VIEW_TYPE_2D;view.subresourceRange.layerCount=1;
@@ -33,13 +33,13 @@ int main(){try{
     images.destroy({},image,nullptr,destroyImage);
     check(images.viewInfo(view).viewType==VK_IMAGE_VIEW_TYPE_2D);
     outcome=VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    check(images.create({},info,nullptr,&image,createImage)==outcome);
+    check(images.create({},info,nullptr,&image,createImage,destroyImage)==outcome&&image==VK_NULL_HANDLE);
     check(images.viewInfo(view).viewType==VK_IMAGE_VIEW_TYPE_2D);
     info.initialLayout=VK_IMAGE_LAYOUT_PREINITIALIZED;
-    check(images.create({},info,nullptr,&image,createImage)==VK_ERROR_FORMAT_NOT_SUPPORTED);
+    check(images.create({},info,nullptr,&image,createImage,destroyImage)==VK_ERROR_FORMAT_NOT_SUPPORTED&&image==VK_NULL_HANDLE);
     // Parallel readers alongside registry churn; stable images must retain
     // their classification while unrelated handles are inserted and removed.
-    images.track(image,2);
+    image=view.image;images.track(image,2);
     std::atomic<bool> start{false},valid{true};std::vector<std::thread> readers;
     for(unsigned n=0;n<4;++n)readers.emplace_back([&]{
         while(!start.load())std::this_thread::yield();
