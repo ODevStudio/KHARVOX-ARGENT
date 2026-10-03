@@ -121,12 +121,19 @@ struct Image {
 };
 struct Requests {
     std::filesystem::path directory,request;
+    bool owned{};
     Requests(){
-        wchar_t root[MAX_PATH]{},unique[MAX_PATH]{};check(GetTempPathW(MAX_PATH,root)&&GetTempFileNameW(root,L"adl",0,unique),"Temporary request path unavailable");
-        check(DeleteFileW(unique)&&CreateDirectoryW(unique,nullptr),"Temporary request directory unavailable");directory=unique;request=directory/L"aa-mode.request";
+        wchar_t inherited[MAX_PATH]{};const auto length=GetEnvironmentVariableW(L"ARGENT_DLSS_TEST_DIR",inherited,MAX_PATH);
+        if(length&&length<MAX_PATH)directory=inherited;
+        else {
+            wchar_t root[MAX_PATH]{},unique[MAX_PATH]{};check(GetTempPathW(MAX_PATH,root)&&GetTempFileNameW(root,L"adl",0,unique),"Temporary request path unavailable");
+            check(DeleteFileW(unique)&&CreateDirectoryW(unique,nullptr),"Temporary request directory unavailable");directory=unique;owned=true;
+            check(SetEnvironmentVariableW(L"ARGENT_DLSS_TEST_DIR",directory.c_str()),"Request directory environment unavailable");
+        }
+        request=directory/L"aa-mode.request";
         const auto log=directory/L"argent.log";check(SetEnvironmentVariableW(L"ARGENT_LOG",log.c_str()),"Request environment unavailable");
     }
-    ~Requests(){DeleteFileW(request.c_str());RemoveDirectoryW(directory.c_str());}
+    ~Requests(){if(owned){DeleteFileW(request.c_str());RemoveDirectoryW(directory.c_str());}}
     bool written() const {std::ifstream stream(request);std::string content;stream>>content;return content=="0";}
 };
 void* const originalSentinel=reinterpret_cast<void*>(uintptr_t(0x76543210));
@@ -191,25 +198,38 @@ void runCase(std::string_view scenario,const Requests& requests){
     if(throwLogs)check(logFailures>0,"Logging fault was not exercised");
     if(scenario.find("oom")!=std::string_view::npos)check(allocationFailures==1,"Formatting fault was not exercised");
 }
-bool child(const wchar_t* executable,const std::wstring& scenario,bool store){
-    std::wstring command=L"\""+std::wstring(executable)+L"\" "+scenario+(store?L" store":L" steam");STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
+#include "DlssHookCallbacks.inc"
+bool child(const wchar_t* executable,const std::wstring& scenario,bool store,const Requests& requests,bool timing=false){
+    std::wstring command=L"\""+std::wstring(executable)+L"\" "+scenario+(store?L" store":L" steam")+(timing?L" timing":L" quiet");STARTUPINFOW startup{};startup.cb=sizeof(startup);PROCESS_INFORMATION process{};
     check(CreateProcessW(executable,command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&process),"DLSS child unavailable");
     const auto wait=WaitForSingleObject(process.hProcess,15000);DWORD code{};if(wait!=WAIT_OBJECT_0){TerminateProcess(process.hProcess,1);WaitForSingleObject(process.hProcess,INFINITE);}
     const DWORD expected=scenario.rfind(L"remove-fatal-",0)==0?0xc0000602u:0u;
     const bool passed=wait==WAIT_OBJECT_0&&GetExitCodeProcess(process.hProcess,&code)&&code==expected;CloseHandle(process.hThread);CloseHandle(process.hProcess);
-    if(!passed)std::wcerr<<scenario<<L" store="<<store<<L" exit="<<code<<L'\n';return passed;
+    DeleteFileW(requests.request.c_str());if(!passed)std::wcerr<<scenario<<L" store="<<store<<L" timing="<<timing<<L" exit="<<code<<L'\n';return passed;
 }
 }
 
 int main(int argc,char** argv){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);_set_abort_behavior(0,_WRITE_ABORT_MSG|_CALL_REPORTFAULT);SetEnvironmentVariableW(L"ARGENT_DLSS_STEREO",nullptr);SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",nullptr);SetEnvironmentVariableW(L"ARGENT_SFS_PROFILE_TIMING",nullptr);SetEnvironmentVariableW(L"ARGENT_LOG",nullptr);
     try{
-        if(argc>1&&std::string_view(argv[1])!="--installation"){argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";Image image;imageBytes=image.bytes;Requests requests;runCase(argv[1],requests);return 0;}
+        const bool installationOnly=argc>1&&std::string_view(argv[1])=="--installation",callbacksOnly=argc>1&&std::string_view(argv[1])=="--callbacks";
+        if(argc>1&&!installationOnly&&!callbacksOnly){
+            argent::build::microsoftStore=argc>2&&std::string_view(argv[2])=="store";if(argc>3&&std::string_view(argv[3])=="timing")SetEnvironmentVariableW(L"ARGENT_EXTENDED_LOGGING",L"1");
+            Image image;imageBytes=image.bytes;Requests requests;const std::string_view scenario=argv[1];if(scenario.rfind("callback-",0)==0)runCallback(scenario,requests);else runCase(scenario,requests);return 0;
+        }
+        SetEnvironmentVariableW(L"ARGENT_DLSS_TEST_DIR",nullptr);Requests requests;
         wchar_t executable[32768]{};check(GetModuleFileNameW(nullptr,executable,32768)!=0,"Executable path unavailable");unsigned cases{},failures{};
         for(const bool store:{false,true}){
-            for(const auto scenario:{L"normal",L"repeat",L"logs",L"format-oom",L"concurrent",L"module-null",L"camera-off",L"vr-off",L"disabled",L"queued-foreign",L"signature-0-log",L"signature-0-oom"}){++cases;failures+=!child(executable,scenario,store);}
-            for(unsigned i=0;i<3;++i)for(const auto prefix:{L"signature-",L"create-",L"enable-",L"conflict-",L"queue-error-",L"remove-fatal-"}){++cases;failures+=!child(executable,prefix+std::to_wstring(i),store);}
+            if(!callbacksOnly){
+                for(const auto scenario:{L"normal",L"repeat",L"logs",L"format-oom",L"concurrent",L"module-null",L"camera-off",L"vr-off",L"disabled",L"queued-foreign",L"signature-0-log",L"signature-0-oom"}){++cases;failures+=!child(executable,scenario,store,requests);}
+                for(unsigned i=0;i<3;++i)for(const auto prefix:{L"signature-",L"create-",L"enable-",L"conflict-",L"queue-error-",L"remove-fatal-"}){++cases;failures+=!child(executable,prefix+std::to_wstring(i),store,requests);}
+            }
+            if(!installationOnly)for(const bool timing:{false,true}){
+                for(const auto kind:{L"create",L"duplicate",L"right-error",L"right-null",L"right-alias",L"release",L"release-left-error",L"missing",L"null-input",L"resources-invalid",L"resolve-error",L"resolve-exception",L"left-eval-error",L"right-eval-error",L"evaluate"})for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-"+std::wstring(kind)+L"-"+mode,store,requests,timing);}
+                if(timing)for(const auto mode:{L"normal",L"log",L"oom"}){++cases;failures+=!child(executable,L"callback-window-"+std::wstring(mode),store,requests,timing);}
+                for(const auto scenario:{L"callback-left-error-normal",L"callback-left-null-normal",L"callback-output-null-normal",L"callback-other-feature-normal",L"callback-create-native-throw-normal",L"callback-release-native-throw-normal",L"callback-evaluate-native-throw-normal",L"callback-registration-cleanup-error-normal",L"callback-release-right-error-normal"}){++cases;failures+=!child(executable,scenario,store,requests,timing);}
+            }
         }
-        std::cout<<cases<<" production DLSS installation scenarios, "<<failures<<" failures\n";return failures?1:0;
+        std::cout<<cases<<" production DLSS hook scenarios, "<<failures<<" failures\n";return failures?1:0;
     }catch(const std::exception& error){failAfter=-1;std::cerr<<error.what()<<'\n';return 1;}
 }
