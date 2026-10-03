@@ -22,7 +22,21 @@ class DesktopMirror {
  bool pending{};
  bool mirrorEye{},blankPresented{},failed{};
  DesktopMirrorPacing pacing;
+ PFN_vkDestroySwapchainKHR destroyChain{};
+ PFN_vkDestroyCommandPool destroyPool{};
+ PFN_vkDestroySemaphore destroySemaphore{};
+ PFN_vkDestroyFence destroyFence{};
+ PFN_vkDeviceWaitIdle waitIdle{};
  static void check(VkResult r){if(r!=VK_SUCCESS)throw std::runtime_error("Mirror Vulkan result="+std::to_string(r));}
+ void releaseResources(Device& d){
+  if(done){destroyFence(d.device,done,nullptr);done=VK_NULL_HANDLE;}
+  if(acquired){destroySemaphore(d.device,acquired,nullptr);acquired=VK_NULL_HANDLE;}
+  for(auto& sem:ready)if(sem){destroySemaphore(d.device,sem,nullptr);sem=VK_NULL_HANDLE;}
+  ready.clear();pending=false;
+  if(pool){destroyPool(d.device,pool,nullptr);pool=VK_NULL_HANDLE;}
+  if(chain){destroyChain(d.device,chain,nullptr);chain=VK_NULL_HANDLE;}
+  command=VK_NULL_HANDLE;images.clear();
+ }
 public:
  static bool configuredEnabled(){
   char value[8]{};return GetEnvironmentVariableA("ARGENT_DESKTOP_MIRROR",value,sizeof(value))==1&&value[0]=='1';
@@ -36,7 +50,24 @@ public:
  VkSwapchainKHR handle()const{return chain;}
  bool needsFrame()const{return chain&&!failed&&(mirrorEye||!blankPresented);}
  bool create(Device& d,const VkSwapchainCreateInfoKHR& original,uint32_t maxFps=configuredFps(),bool showEye=configuredEnabled()){
-  mirrorEye=showEye;blankPresented=failed=false;
+  if(chain)return false;
+  failed=true;
+  if(!d.device||!d.graphicsQueue||!d.queueMutex||!d.gipa||!d.gdpa)return false;
+  try{
+  const auto createChain=d.proc<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR");
+  const auto enumerateImages=d.proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR");
+  const auto createPool=d.proc<PFN_vkCreateCommandPool>("vkCreateCommandPool");
+  const auto allocate=d.proc<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers");
+  const auto createSemaphore=d.proc<PFN_vkCreateSemaphore>("vkCreateSemaphore");
+  const auto createFence=d.proc<PFN_vkCreateFence>("vkCreateFence");
+  destroyChain=d.proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR");
+  destroyPool=d.proc<PFN_vkDestroyCommandPool>("vkDestroyCommandPool");
+  destroySemaphore=d.proc<PFN_vkDestroySemaphore>("vkDestroySemaphore");
+  destroyFence=d.proc<PFN_vkDestroyFence>("vkDestroyFence");
+  waitIdle=d.proc<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle");
+  if(!createChain||!enumerateImages||!createPool||!allocate||!createSemaphore||!createFence
+     ||!destroyChain||!destroyPool||!destroySemaphore||!destroyFence||!waitIdle)return false;
+  mirrorEye=showEye;blankPresented=false;
   pacing.configure(maxFps);
   auto info=original;info.oldSwapchain=VK_NULL_HANDLE;info.imageArrayLayers=1;info.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;info.flags=0;info.pNext=nullptr;
   sourceExtent=original.imageExtent;
@@ -45,13 +76,19 @@ public:
    const auto target=xrDisplayFormat(original.imageFormat,original.imageColorSpace==VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
    if(target!=info.imageFormat){
     auto formats=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>(d.gipa(d.instance,"vkGetPhysicalDeviceSurfaceFormatsKHR"));
-    uint32_t count{};bool supported=false;
-    if(formats&&formats(d.physical,info.surface,&count,nullptr)==VK_SUCCESS){
+    bool supported=false;
+    for(unsigned attempt=0;formats&&attempt<3;++attempt){
+     uint32_t count{};
+     if(formats(d.physical,info.surface,&count,nullptr)!=VK_SUCCESS||!count)break;
      std::vector<VkSurfaceFormatKHR> available(count);
-     if(formats(d.physical,info.surface,&count,available.data())==VK_SUCCESS)
-      for(auto f:available)if((f.format==target||f.format==VK_FORMAT_UNDEFINED)&&f.colorSpace==info.imageColorSpace)supported=true;
+     const auto result=formats(d.physical,info.surface,&count,available.data());
+     if(result==VK_INCOMPLETE)continue;
+     if(result!=VK_SUCCESS||count>available.size())break;
+     available.resize(count);
+     for(auto f:available)if((f.format==target||f.format==VK_FORMAT_UNDEFINED)&&f.colorSpace==info.imageColorSpace)supported=true;
+     break;
     }
-    if(!supported){log("Desktop mirror: matching sRGB surface format unavailable");return false;}
+    if(!supported){try{log("Desktop mirror: matching sRGB surface format unavailable");}catch(...){}return false;}
     info.imageFormat=target;
    }
   }
@@ -60,30 +97,59 @@ public:
   if(surfaceCaps&&surfaceCaps(d.physical,info.surface,&caps)==VK_SUCCESS){
    if(caps.currentExtent.width!=UINT32_MAX)info.imageExtent=caps.currentExtent;
   }
+  if(!info.imageExtent.width||!info.imageExtent.height)return false;
   // The desktop must not pace XR. Game settings may recreate a FIFO chain
   // after startup CVars have run, so also select a supported unpaced mode here.
   auto presentModes=reinterpret_cast<PFN_vkGetPhysicalDeviceSurfacePresentModesKHR>(d.gipa(d.instance,"vkGetPhysicalDeviceSurfacePresentModesKHR"));
-  uint32_t modeCount{};
-  if(presentModes&&presentModes(d.physical,info.surface,&modeCount,nullptr)==VK_SUCCESS){
+  for(unsigned attempt=0;presentModes&&attempt<3;++attempt){
+   uint32_t modeCount{};
+   if(presentModes(d.physical,info.surface,&modeCount,nullptr)!=VK_SUCCESS||!modeCount)break;
    std::vector<VkPresentModeKHR> modes(modeCount);
-   if(presentModes(d.physical,info.surface,&modeCount,modes.data())==VK_SUCCESS){
-    for(auto mode:modes)if(mode==VK_PRESENT_MODE_IMMEDIATE_KHR){info.presentMode=mode;break;}
-   }
+   const auto result=presentModes(d.physical,info.surface,&modeCount,modes.data());
+   if(result==VK_INCOMPLETE)continue;
+   if(result!=VK_SUCCESS||modeCount>modes.size())break;
+   modes.resize(modeCount);
+   for(auto mode:modes)if(mode==VK_PRESENT_MODE_IMMEDIATE_KHR){info.presentMode=mode;break;}
+   break;
   }
-  log("SFS_MIRROR_PRESENT requested="+std::to_string(original.presentMode)+" selected="+std::to_string(info.presentMode)+" maxFps="+std::to_string(maxFps));
+  try{log("SFS_MIRROR_PRESENT requested="+std::to_string(original.presentMode)+" selected="+std::to_string(info.presentMode)+" maxFps="+std::to_string(maxFps));}catch(...){}
   info.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE;info.queueFamilyIndexCount=0;info.pQueueFamilyIndices=nullptr;
-  if(d.proc<PFN_vkCreateSwapchainKHR>("vkCreateSwapchainKHR")(d.device,&info,nullptr,&chain)!=VK_SUCCESS)return false;
-  extent=info.imageExtent;uint32_t n{};check(d.proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR")(d.device,chain,&n,nullptr));images.resize(n);check(d.proc<PFN_vkGetSwapchainImagesKHR>("vkGetSwapchainImagesKHR")(d.device,chain,&n,images.data()));
-  log("SFS_DESKTOP mode="+std::string(mirrorEye?"eye":"blank")+" extent="+std::to_string(extent.width)+"x"+std::to_string(extent.height));
+  VkSwapchainKHR createdChain{};
+  if(createChain(d.device,&info,nullptr,&createdChain)!=VK_SUCCESS)return false;
+  if(!createdChain)check(VK_ERROR_INITIALIZATION_FAILED);
+  chain=createdChain;extent=info.imageExtent;
+  for(unsigned attempt=0;;++attempt){
+   uint32_t count{};check(enumerateImages(d.device,chain,&count,nullptr));
+   if(!count)check(VK_ERROR_INITIALIZATION_FAILED);
+   images.resize(count);const auto result=enumerateImages(d.device,chain,&count,images.data());
+   if(result==VK_INCOMPLETE&&attempt<2)continue;
+   check(result);
+   if(!count||count>images.size())check(VK_ERROR_INITIALIZATION_FAILED);
+   images.resize(count);break;
+  }
+  try{log("SFS_DESKTOP mode="+std::string(mirrorEye?"eye":"blank")+" extent="+std::to_string(extent.width)+"x"+std::to_string(extent.height));}catch(...){}
   VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;pi.queueFamilyIndex=d.graphicsFamily;
-  check(d.proc<PFN_vkCreateCommandPool>("vkCreateCommandPool")(d.device,&pi,nullptr,&pool));
+  VkCommandPool createdPool{};check(createPool(d.device,&pi,nullptr,&createdPool));
+  if(!createdPool)check(VK_ERROR_INITIALIZATION_FAILED);pool=createdPool;
   VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ai.commandPool=pool;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
-  check(d.proc<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(d.device,&ai,&command));if(d.setLoaderData)check(d.setLoaderData(d.device,command));
-  VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};check(d.proc<PFN_vkCreateSemaphore>("vkCreateSemaphore")(d.device,&si,nullptr,&acquired));
+  VkCommandBuffer createdCommand{};check(allocate(d.device,&ai,&createdCommand));
+  if(!createdCommand)check(VK_ERROR_INITIALIZATION_FAILED);command=createdCommand;
+  if(d.setLoaderData)check(d.setLoaderData(d.device,command));
+  VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore createdSemaphore{};
+  check(createSemaphore(d.device,&si,nullptr,&createdSemaphore));
+  if(!createdSemaphore)check(VK_ERROR_INITIALIZATION_FAILED);acquired=createdSemaphore;
   // A present wait is retired by reacquiring that WSI image, not merely by
   // completion of the copy fence. Keep one ready semaphore per WSI image.
-  ready.resize(images.size());for(auto& sem:ready)check(d.proc<PFN_vkCreateSemaphore>("vkCreateSemaphore")(d.device,&si,nullptr,&sem));
-  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};check(d.proc<PFN_vkCreateFence>("vkCreateFence")(d.device,&fi,nullptr,&done));return true;
+  ready.resize(images.size());
+  for(auto& sem:ready){
+   VkSemaphore created{};check(createSemaphore(d.device,&si,nullptr,&created));
+   if(!created)check(VK_ERROR_INITIALIZATION_FAILED);sem=created;
+  }
+  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence createdFence{};
+  check(createFence(d.device,&fi,nullptr,&createdFence));
+  if(!createdFence)check(VK_ERROR_INITIALIZATION_FAILED);done=createdFence;
+  failed=false;return true;
+  }catch(...){releaseResources(d);throw;}
  }
  void present(Device& d,VkImage source,VkQueue sourceRetirementQueue,DesktopMirrorPacing::Clock::time_point now=DesktopMirrorPacing::Clock::now(),VkExtent2D finalExtent={},VkImageLayout sourceLayout=VK_IMAGE_LAYOUT_GENERAL,bool waitForSource=false){
   if(!needsFrame()||!pacing.due(now))return;
@@ -164,14 +230,9 @@ public:
  void destroy(Device& d){
   if(!chain)return;
   std::lock_guard<std::recursive_mutex> lock(*d.queueMutex);
-  const auto retired=d.proc<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(d.device);
+  const auto retired=waitIdle(d.device);
   if(retired!=VK_ERROR_DEVICE_LOST)check(retired);
-  if(done)d.proc<PFN_vkDestroyFence>("vkDestroyFence")(d.device,done,nullptr);
-  if(acquired)d.proc<PFN_vkDestroySemaphore>("vkDestroySemaphore")(d.device,acquired,nullptr);
-  for(auto sem:ready)if(sem)d.proc<PFN_vkDestroySemaphore>("vkDestroySemaphore")(d.device,sem,nullptr);ready.clear();pending=false;
-  if(pool)d.proc<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(d.device,pool,nullptr);
-  d.proc<PFN_vkDestroySwapchainKHR>("vkDestroySwapchainKHR")(d.device,chain,nullptr);chain=VK_NULL_HANDLE;
-  done=VK_NULL_HANDLE;acquired=VK_NULL_HANDLE;pool=VK_NULL_HANDLE;command=VK_NULL_HANDLE;images.clear();
+  releaseResources(d);
  }
 };
 }
