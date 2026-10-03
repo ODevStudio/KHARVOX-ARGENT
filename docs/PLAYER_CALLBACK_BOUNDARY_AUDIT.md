@@ -246,3 +246,42 @@ relevant diagnostics were inspected. This is stability work without a claimed
 FPS improvement or additional GPU wait. Actual engine resolvers, render-world
 publication, Store disassembly and complete root/game/headset lifecycle remain
 unverified.
+
+## Native Pointers, Hammer RTTI and Laser Locators
+
+The common pointer reader ignored the read outcome and returned its output even
+after failure or an incomplete result. Identity lookup also retained that output
+for independent Hammer classification after a failed primary-pointer read.
+The reader now returns null unless the complete read succeeds; identity lookup
+reuses it without adding reads. Valid Hammer RTTI remains independent of the
+weapon declaration name/vtable, and existing locator selection is unchanged.
+
+The installed Steam executable is still 77,207,984 bytes at build `25216728` and
+matches SHA-256 `69dc13e88d1c19133ead7950dc64ebcbd4a5a3f6bd6f9c336ebffe56df6a1c11`.
+Read-only binary inspection finds the exact terminated Hammer name at RVA
+`0x4214140`, type descriptor `0x4214130`, complete-object locator `0x357cc20`
+and vtable `0x2e10910`. Locator fields are signature `1`, offsets `0/0`,
+type `0x4214130`, hierarchy `0x357cc48` and self `0x357cc20`. This establishes
+the existing image-relative RTTI layout rather than just guessing a class name.
+Native `0x1981bc0` forwards root position/basis at `+0x158/+0x164` and mode to
+`0x19819d0`; the latter checks `AL` and returns `AL=1` only after success.
+No native code or game installation was changed.
+
+The first fixture used `hammer` instead of the existing `sentinel_hammer`
+profile key, causing eight false failures. The repaired baseline reproduces
+sixteen real failures in 478 scenarios: poisoned failed/short pointer outputs
+can select a Hammer profile or reach the native laser transform. Fault injection
+performs a real read before reporting failure or a six-byte result; it tests
+output rejection, not a claim that every Windows partial read writes this way.
+
+All 478 cases pass across Steam/Store and timing/quiet variants. Owned read-only
+RTTI pages cover valid detection, invalid signatures/self/type/name/vtable,
+declaration independence and rejected generations/null handles. Locator cases
+cover exact `_info`/`muzzle` selection past unrelated groups and `muzzle_light`,
+bounded counts, missing models/definitions, hidden roots/items, zero masks,
+native false/SEH, invalid position/basis and validated transform arguments.
+Seven focused checks pass in 13.71 seconds; all 123 checks pass in 110.06 seconds.
+The fixture and production player source compile; raw diffs and diagnostics were
+inspected. No cache, heap allocation, GPU wait or FPS gain is added or claimed.
+Static Steam evidence and owned dispatch are not live game/Store/headset proof;
+actual native model resolution and complete object lifetimes remain unverified.
