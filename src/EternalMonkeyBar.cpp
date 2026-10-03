@@ -7,6 +7,9 @@
 #include "QuadRuntime.h"
 #include <MinHook.h>
 #include <intrin.h>
+#include <array>
+#include <exception>
+#include <mutex>
 #include <cstring>
 extern "C" {void* argentMonkeyResume{};void argentMonkeyBridge();}
 namespace argent::monkey {namespace {
@@ -25,6 +28,27 @@ struct Pose {uintptr_t owner{};ULONGLONG tick{};float origin[3]{};float axis[9]{
 thread_local Pose query,view;
 thread_local Pose facing;
 bool facingEnabled{};
+std::mutex monkeyInstallationGuard;
+bool monkeyHooksInstalled{};
+void removeOwnedMonkeyHook(void* target) noexcept {
+ if(MH_RemoveHook(target)!=MH_OK){RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+}
+struct MonkeyHookAttempt {
+ const std::array<void*,5>& targets;
+ const std::array<void**,5>& originals;
+ const std::array<void*,5>& previousOriginals;
+ unsigned char* previousImage;
+ StopDash previousStop;
+ bool previousFacing;
+ size_t created{};
+ bool committed{};
+ ~MonkeyHookAttempt(){
+  if(committed)return;
+  for(size_t i=created;i>0;--i)removeOwnedMonkeyHook(targets[i-1]);
+  for(size_t i=0;i<created;++i)*originals[i]=previousOriginals[i];
+  image=previousImage;nativeStopDash=previousStop;facingEnabled=previousFacing;
+ }
+};
 bool local(void* owner) {
  return owner&&uintptr_t(owner)==presentation::player.load()&&
   (presentation::worldPresentation.load()||presentation::gameplayInput.load())&&!presentation::syncAttack.load();
@@ -141,51 +165,56 @@ void acceptedBar(uintptr_t owner) {
  if(active)nativeStopDash(reinterpret_cast<void*>(owner),false);
  if(extendedLogging())log(std::string("ETERNAL_MONKEYBAR accepted=1 dashActive=")+(active?"1 stop=requested refill=0":"0"));
 }
-bool install(unsigned char* base) {
- image=base;
- facingEnabled=!std::memcmp(image+build::rva(0xd9d168)-6,"\xff\x90\x70\x04\x00\x00",6)&&
-  !std::memcmp(image+build::rva(0xd9d185)-6,"\xff\x90\x78\x04\x00\x00",6);
- log("ETERNAL_FACING_TRIGGER contract="+std::to_string(facingEnabled)+" scope=local-view-getters native-trigger-conditions=preserved");
+bool install(unsigned char* base) {try{
+ std::lock_guard<std::mutex> lock(monkeyInstallationGuard);
+ if(monkeyHooksInstalled)return base==image;
+ if(!base)return false;
+ const bool canFace=!std::memcmp(base+build::rva(0xd9d168)-6,"\xff\x90\x70\x04\x00\x00",6)&&
+  !std::memcmp(base+build::rva(0xd9d185)-6,"\xff\x90\x78\x04\x00\x00",6);
  const unsigned char getterTail[]={0x83,0x7a,8,0,0x41,0x0f,0x44,0xc0,0x48,3,0xc1,0xc3};
  for(auto rva:{uintptr_t(0x13e8950),uintptr_t(0x13e8970)}) {
-  const auto p=image+build::rva(rva);
+  const auto p=base+build::rva(rva);
   if(std::memcmp(p,"\x48\x8b\x15",3)||std::memcmp(p+18,getterTail,sizeof(getterTail)))return false;
  }
  for(auto caller:{uintptr_t(0x1399bf7),uintptr_t(0x139a842),uintptr_t(0x139a8f0),uintptr_t(0x1397a7c),uintptr_t(0x1397aef)})
-  if(std::memcmp(image+build::rva(caller)-6,"\xff\x90\x70\x04\x00\x00",6))return false;
+  if(std::memcmp(base+build::rva(caller)-6,"\xff\x90\x70\x04\x00\x00",6))return false;
  for(auto caller:{uintptr_t(0x139a79a),uintptr_t(0x1399c83),uintptr_t(0x139a295),uintptr_t(0x139a85f),uintptr_t(0x139a90e)})
-  if(std::memcmp(image+build::rva(caller)-6,"\xff\x90\x78\x04\x00\x00",6))return false;
- if(std::memcmp(image+build::rva(0x1398d5d),"\x0f\x28\x15",3))return false;
- if(std::memcmp(image+build::rva(0x13989b0),"\x40\x53\x48\x83\xec\x20\x48\x8b\x01\x48\x8b\xd9",12))return false;
+  if(std::memcmp(base+build::rva(caller)-6,"\xff\x90\x78\x04\x00\x00",6))return false;
+ if(std::memcmp(base+build::rva(0x1398d5d),"\x0f\x28\x15",3))return false;
+ if(std::memcmp(base+build::rva(0x13989b0),"\x40\x53\x48\x83\xec\x20\x48\x8b\x01\x48\x8b\xd9",12))return false;
  for(auto ret:{uintptr_t(0xfbdc3a),uintptr_t(0xfbddc9)}){
-  auto call=image+build::rva(ret)-5;int displacement{};std::memcpy(&displacement,call+1,4);
-  if(*call!=0xe8||call+5+displacement!=image+build::rva(0x13989b0))return false;
+  auto call=base+build::rva(ret)-5;int displacement{};std::memcpy(&displacement,call+1,4);
+  if(*call!=0xe8||call+5+displacement!=base+build::rva(0x13989b0))return false;
  }
- const auto stop=image+build::rva(0x13e5be0);
+ const auto stop=base+build::rva(0x13e5be0);
  if(std::memcmp(stop,"\x48\x8b\x89\x88\xce\x04\x00\x48\x85\xc9\x0f\x85",12)||stop[16]!=0xc3)return false;
  int delta{};std::memcpy(&delta,stop+12,4);
- if(stop+16+delta!=image+build::rva(0xfd6790))return false;
- const auto ability=image+build::rva(0xfd6790);
+ if(stop+16+delta!=base+build::rva(0xfd6790))return false;
+ const auto ability=base+build::rva(0xfd6790);
  if(std::memcmp(ability,"\x40\x53\x48\x83\xec\x20\x48\x83\xb9\x98\x02\x00\x00\x00",14)||
     std::memcmp(ability+0x13,"\x84\xd2\x74\x38",4)||ability[0x5b]!=0xe9)return false;
  std::memcpy(&delta,ability+0x5c,4);
- if(ability+0x60+delta!=image+build::rva(0xfbbf60))return false;
- if(std::memcmp(image+build::rva(0xb420e0),"\x48\x89\x5c\x24\x08\x48\x89\x74\x24\x18\x57\x48\x83\xec\x20",15))return false;
- const auto completedCall=image+build::rva(0x1398a8c)-5;
+ if(ability+0x60+delta!=base+build::rva(0xfbbf60))return false;
+ if(std::memcmp(base+build::rva(0xb420e0),"\x48\x89\x5c\x24\x08\x48\x89\x74\x24\x18\x57\x48\x83\xec\x20",15))return false;
+ const auto completedCall=base+build::rva(0x1398a8c)-5;
  std::memcpy(&delta,completedCall+1,4);
- if(*completedCall!=0xe8||completedCall+5+delta!=image+build::rva(0xb420e0))return false;
- void* targets[]={image+build::rva(0x13e8950),image+build::rva(0x13e8970),image+build::rva(0x1398d5d),image+build::rva(0x13989b0),image+build::rva(0xb420e0)};
- void* detours[]={reinterpret_cast<void*>(&axis),reinterpret_cast<void*>(&origin),reinterpret_cast<void*>(&argentMonkeyBridge),reinterpret_cast<void*>(&cancel),reinterpret_cast<void*>(&completion)};
- void** originals[]={reinterpret_cast<void**>(&nativeAxis),reinterpret_cast<void**>(&nativeOrigin),&argentMonkeyResume,reinterpret_cast<void**>(&nativeCancel),reinterpret_cast<void**>(&nativeCompletion)};
- unsigned created=0;
- for(;created<5;++created)if(MH_CreateHook(targets[created],detours[created],originals[created])!=MH_OK)break;
- if(created==5){unsigned enabled=0;for(;enabled<5;++enabled)if(MH_EnableHook(targets[enabled])!=MH_OK)break;
-  if(enabled==5){nativeStopDash=reinterpret_cast<StopDash>(stop);log("ETERNAL_MONKEYBAR aim=HMD origin=current-native+HMD-offset launch=HMD dash-handoff=native-stop-before-launch native-force=1");return true;}
-  for(unsigned i=0;i<enabled;++i)MH_DisableHook(targets[i]);
+ if(*completedCall!=0xe8||completedCall+5+delta!=base+build::rva(0xb420e0))return false;
+ const std::array<void*,5> targets{base+build::rva(0x13e8950),base+build::rva(0x13e8970),base+build::rva(0x1398d5d),base+build::rva(0x13989b0),base+build::rva(0xb420e0)};
+ const std::array<void*,5> detours{reinterpret_cast<void*>(&axis),reinterpret_cast<void*>(&origin),reinterpret_cast<void*>(&argentMonkeyBridge),reinterpret_cast<void*>(&cancel),reinterpret_cast<void*>(&completion)};
+ const std::array<void**,5> originals{reinterpret_cast<void**>(&nativeAxis),reinterpret_cast<void**>(&nativeOrigin),&argentMonkeyResume,reinterpret_cast<void**>(&nativeCancel),reinterpret_cast<void**>(&nativeCompletion)};
+ const std::array<void*,5> previousOriginals{*originals[0],*originals[1],*originals[2],*originals[3],*originals[4]};
+ MonkeyHookAttempt attempt{targets,originals,previousOriginals,image,nativeStopDash,facingEnabled};
+ for(size_t i=0;i<targets.size();++i){
+  if(MH_CreateHook(targets[i],detours[i],originals[i])!=MH_OK)return false;
+  ++attempt.created;
  }
- for(unsigned i=0;i<created;++i)MH_RemoveHook(targets[i]);
- return false;
-}
+ image=base;facingEnabled=canFace;nativeStopDash=reinterpret_cast<StopDash>(stop);
+ for(const auto target:targets)if(MH_EnableHook(target)!=MH_OK)return false;
+ attempt.committed=true;monkeyHooksInstalled=true;
+ try{log("ETERNAL_FACING_TRIGGER contract="+std::to_string(facingEnabled)+" scope=local-view-getters native-trigger-conditions=preserved");}catch(...){}
+ try{log("ETERNAL_MONKEYBAR aim=HMD origin=current-native+HMD-offset launch=HMD dash-handoff=native-stop-before-launch native-force=1");}catch(...){}
+ return true;
+ }catch(...){return false;}}
 }
 extern "C" void argentMonkeyLaunch(void* mechanic,float* x,float* y) {
  using namespace argent;
