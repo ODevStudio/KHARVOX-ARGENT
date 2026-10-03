@@ -9,6 +9,7 @@
 | `cda8d14` | Stability | Preserve placement bookkeeping and nested visibility through cache failures. |
 | `506e343` | Stability | Retain per-root masks across interleaved hands and invalidate observed native identity changes. |
 | `c17eccb` | Stability | Honor the native attachment boolean result and share calibration/rest-pose presentation eligibility. |
+| `e570396` | Performance/Stability | Bulk-read bounded native names with page-edge fallback and reject incomplete identities. |
 
 ## Callback Findings
 
@@ -174,3 +175,42 @@ the real native locator resolver, actual hammer RTTI or precision-bolt show and
 render publication. Native disassembly evidence is from Steam, not a Store
 installation. Full game/headset transitions and complete root-cache lifecycle
 remain unverified.
+
+## Native Weapon Identity Reads
+
+The native name probe issued one Windows memory read for every byte through the
+terminator. For the normal crucible name, the complete identity lookup used 31
+reads. An unreadable, unterminated name exactly matching the crucible prefix
+could also inherit the initialized buffer's zero byte and enable its profile.
+
+The probe now attempts one bounded 255-byte read into its existing stack buffer.
+A failed bulk read clears partial output and retains the guarded byte fallback,
+so a valid terminator immediately before an unreadable page remains accepted.
+A successful read without an observed terminator is rejected. Accepted names
+retain zero-filled trailing bytes; rejected names are cleared before kind or
+crucible selection. Generation, declaration-vtable and independent hammer RTTI
+checks remain in place. No cache, heap allocation or GPU wait is added.
+
+The expanded baseline reproduces twelve failures in 274 cases: unnecessary
+byte reads, unterminated page-edge crucible selection and retained overlong
+source bytes, each across both profiles and timing modes. All 274 final cases
+pass, including real `PAGE_NOACCESS` boundaries, valid page-edge fallback,
+unreadable/overlong names, mismatched generation/vtable and heap rejection.
+
+An optional `identity-benchmark` mode in the existing callback fixture runs
+2,000 warm-up lookups and five batches of 10,000 lookups through real Windows
+memory reads on owned native-layout objects. A checksum preserves classification
+work; the fixture counts memory calls. Sequential Release measurements:
+
+| Path | Median (us/lookup) | Min | Max | Reads/lookup |
+| --- | --- | --- | --- | --- |
+| Original byte probe | 15.5774 | 15.3518 | 15.7414 | 31 |
+| Bounded bulk probe | 5.90984 | 5.83664 | 6.03792 | 9 |
+
+This isolated lookup saves about 9.7 microseconds, roughly 62% of its CPU time.
+It is not a 62% gameplay improvement. Actual calls per frame, page-edge frequency,
+clock state and the CPU/GPU bottleneck remain unmeasured; no combined FPS claim
+follows. Seven focused checks pass in 10.02 seconds, the production player source
+compiles, and all 123 harness checks pass in 107.06 seconds. Raw diffs, relevant
+diagnostics and both benchmark outputs were inspected. Native gameplay and
+concurrent game-object lifetime remain outside this fixture.
