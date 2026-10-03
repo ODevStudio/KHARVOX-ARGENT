@@ -7,11 +7,14 @@
 #include "QuadRuntime.h"
 #include <MinHook.h>
 #include <cstring>
+#include <exception>
 namespace argent::revenant { namespace {
 using Think=void(__fastcall*)(void*,const void*,const void*);
 using SetBasis=void(__fastcall*)(void*,const float*);
 using SetView=void(__fastcall*)(void*,const float*,bool);
 Think original{};SetBasis setBasis{};SetView setView{};
+std::mutex revenantInstallationGuard;
+unsigned char* installedImage{};
 thread_local uintptr_t commandActor{};
 thread_local uint64_t previousActions{};
 bool read(uintptr_t address,void* out,size_t size){SIZE_T got{};return ReadProcessMemory(GetCurrentProcess(),reinterpret_cast<void*>(address),out,size,&got)&&got==size;}
@@ -66,6 +69,10 @@ void __fastcall think(void* object,const void* previous,const void* current){
 void* installFixture(Think native,SetBasis basis,SetView view,uintptr_t type){original=native;setBasis=basis;setView=view;expectedType=type;return reinterpret_cast<void*>(&think);}
 #endif
 bool install(unsigned char* image) noexcept {
+ try{
+ std::lock_guard<std::mutex> lock(revenantInstallationGuard);
+ if(installedImage)return image==installedImage;
+ if(!image)return false;
  const auto type=build::rva(0x2d99918),update=build::rva(0x133daa0),basis=build::rva(0x12c07c0),view=build::rva(0x12c0620);
  if(!type||!update||!basis||!view)return false;
  constexpr unsigned char thinkBytes[]{0x40,0x55,0x53,0x56,0x57,0x48,0x8d,0xac,0x24,0x58,0xff,0xff,0xff,0x48,0x81,0xec,0xa8,0x01,0,0};
@@ -75,9 +82,17 @@ bool install(unsigned char* image) noexcept {
  constexpr unsigned char viewBytes[]{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18,0x48,0x89,0x7c,0x24,0x20};
  if(std::memcmp(image+view,viewBytes,sizeof(viewBytes)))return false;
  uintptr_t method{};std::memcpy(&method,image+type+0x1968,8);if(method!=uintptr_t(image)+update)return false;
- setBasis=reinterpret_cast<SetBasis>(image+basis);setView=reinterpret_cast<SetView>(image+view);expectedType=uintptr_t(image)+type;
- if(MH_CreateHook(image+update,reinterpret_cast<void*>(&think),reinterpret_cast<void**>(&original))!=MH_OK)return false;
- if(MH_EnableHook(image+update)!=MH_OK){MH_RemoveHook(image+update);return false;}
- installed=true;log("ETERNAL_REVENANT ready=1 detection=resolved-local-first-person input=native-bindings");return true;
+ Think nextOriginal{};
+ if(MH_CreateHook(image+update,reinterpret_cast<void*>(&think),reinterpret_cast<void**>(&nextOriginal))!=MH_OK)return false;
+ const auto previousOriginal=original;const auto previousBasis=setBasis;const auto previousView=setView;const auto previousType=expectedType.load();
+ original=nextOriginal;setBasis=reinterpret_cast<SetBasis>(image+basis);setView=reinterpret_cast<SetView>(image+view);expectedType=uintptr_t(image)+type;
+ if(MH_EnableHook(image+update)!=MH_OK){
+  if(MH_RemoveHook(image+update)!=MH_OK){RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+  original=previousOriginal;setBasis=previousBasis;setView=previousView;expectedType=previousType;return false;
+ }
+ installedImage=image;installed=true;
+ try{log("ETERNAL_REVENANT ready=1 detection=resolved-local-first-person input=native-bindings");}catch(...){}
+ return true;
+ }catch(...){return false;}
 }
 }
