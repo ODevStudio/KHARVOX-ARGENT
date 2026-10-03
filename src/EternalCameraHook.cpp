@@ -29,10 +29,13 @@
 #include <cstring>
 #include <cstdlib>
 #include <intrin.h>
+#include <climits>
+#include <exception>
 namespace argent::camera { namespace {
 using Setter=void(__fastcall*)(void*,const float*,const float*);
 Setter original{};void* target{};
 std::mutex poseMutex;
+std::mutex installationMutex;
 XrQuaternionf current{0,0,0,1},reference{0,0,0,1};
 XrVector3f currentPosition{},referencePosition{};
 bool translate{},needPositionReference{true};
@@ -264,9 +267,9 @@ bool probeStoreImage(){
 bool approvedStoreImage(){static const bool approved=[](){
  if(!probeStoreImage())return false;
  const auto image=reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
- if(const auto failed=build::validateStoreCode(image)){log("ETERNAL_BUILD refused: Store contract RVA="+std::to_string(failed));return false;}
+ if(const auto failed=build::validateStoreCode(image)){try{log("ETERNAL_BUILD refused: Store contract RVA="+std::to_string(failed));}catch(...){}return false;}
  build::microsoftStore=true;
- log("ETERNAL_BUILD profile=microsoft-store-20260319 native-contracts="+std::to_string(build::storeCodeCount)+" verified=1");return true;
+ try{log("ETERNAL_BUILD profile=microsoft-store-20260319 native-contracts="+std::to_string(build::storeCodeCount)+" verified=1");}catch(...){}return true;
  }();return approved;}
 bool approvedImage(){
  if(approvedStoreImage())return true;
@@ -373,84 +376,21 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
  if(use)++applied;
  original(object,usePosition?moved.data():position,use?transformed.data():basis);
 }
+void failCameraHookRollback() noexcept {RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+void removeOwnedCameraHook(void* hook) noexcept {if(MH_RemoveHook(hook)!=MH_OK)failCameraHookRollback();}
 bool activate(){
  HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&cameraSetter),&pinned))return false;
  auto init=MH_Initialize();if(init!=MH_OK&&init!=MH_ERROR_ALREADY_INITIALIZED)return false;
  auto created=MH_CreateHook(target,reinterpret_cast<void*>(&cameraSetter),reinterpret_cast<void**>(&original));
- if(created!=MH_OK){log("ETERNAL_HOOK create failed="+std::to_string(created));return false;}
- auto enabled=MH_EnableHook(target);if(enabled!=MH_OK){MH_RemoveHook(target);log("ETERNAL_HOOK enable failed="+std::to_string(enabled));return false;}
+ if(created!=MH_OK){try{log("ETERNAL_HOOK create failed="+std::to_string(created));}catch(...){}return false;}
+ auto enabled=MH_EnableHook(target);if(enabled!=MH_OK){removeOwnedCameraHook(target);try{log("ETERNAL_HOOK enable failed="+std::to_string(enabled));}catch(...){}return false;}
  installed=true;return true;
 }
 }
-namespace {
-uint32_t eyeWidth{},eyeHeight{};
-using ClientRect=BOOL(WINAPI*)(HWND,LPRECT);
-ClientRect nativeClientRect{};uintptr_t renderImageBase{};
-using RefreshExtent=void(__fastcall*)();RefreshExtent nativeRefreshExtent{};
-void __fastcall refreshRenderExtent(){
- // These are the engine's output dimensions, not the window CVars. Its own
- // refresh then derives scene/DLSS dimensions and preserves its AA policy.
- auto output=reinterpret_cast<uint32_t*>(renderImageBase+build::rva(0x39aabe4));
- output[0]=eyeWidth;output[1]=eyeHeight;
- nativeRefreshExtent();
-}
-BOOL WINAPI renderClientRect(HWND window,LPRECT rect){
- const auto caller=build::semanticRva(reinterpret_cast<uintptr_t>(_ReturnAddress())-renderImageBase);
- auto ok=nativeClientRect(window,rect);
- // Only the two audited Vulkan swapchain extent queries receive virtual size.
- // Window management, mouse coordinates and minimized windows retain real WSI.
- const bool swapchainCaller=caller==0x1d09134||caller==0x1d091ba;
- if(ok&&rect&&swapchainCaller&&rect->right>rect->left&&rect->bottom>rect->top){
-  rect->right=rect->left+LONG(eyeWidth);rect->bottom=rect->top+LONG(eyeHeight);
- }
- return ok;
-}
-uint32_t __fastcall renderWidth(void*){return eyeWidth;}
-uint32_t __fastcall renderHeight(void*){return eyeHeight;}
-}
+#include "RenderExtentHooks.inc"
 bool storeExecutable() noexcept {return approvedStoreImage();}
-bool installRenderExtent(uint32_t width,uint32_t height) noexcept {try{
- if(eyeWidth)return eyeWidth==width&&eyeHeight==height;
- if(!width||!height||!approvedImage())return false;
- auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
- // Eternal output-resolution accessors; independent from native window size.
- // Same approach as KHARVOX IndependentEngineSize, with Eternal signatures.
- constexpr unsigned char w[]={0x8b,0x05,0x0e,0xb3,0xce,0x01,0xc3,0xcc};
- constexpr unsigned char h[]={0x8b,0x05,0x22,0xb3,0xce,0x01,0xc3,0xcc};
- const bool store=approvedStoreImage();
- auto wt=base+build::rva(0x1cbf8d0);auto ht=base+build::rva(0x1cbf8c0);
- constexpr unsigned char storeW[]={0x8b,0x05,0x8e,0x0e,0xd1,0x01,0xc3,0xcc};
- constexpr unsigned char storeH[]={0x8b,0x05,0xa2,0x0e,0xd1,0x01,0xc3,0xcc};
- if(store ? (std::memcmp(wt,storeW,sizeof(storeW))||std::memcmp(ht,storeH,sizeof(storeH)))
-          : (std::memcmp(wt,w,sizeof(w))||std::memcmp(ht,h,sizeof(h))))return false;
- constexpr unsigned char rect1[]={0xff,0x15,0x14,0x2f,0xd1,0x00};
- constexpr unsigned char rect2[]={0xff,0x15,0x8e,0x2e,0xd1,0x00};
- constexpr unsigned char storeRect1[]={0xff,0x15,0x34,0x5c,0xd2,0x00};
- constexpr unsigned char storeRect2[]={0xff,0x15,0xae,0x5b,0xd2,0x00};
- if(store ? (std::memcmp(base+0x1d9568e,storeRect1,6)||std::memcmp(base+0x1d95714,storeRect2,6))
-          : (std::memcmp(base+0x1d0912e,rect1,6)||std::memcmp(base+0x1d091b4,rect2,6)))return false;
- constexpr unsigned char refresh[]={0x48,0x83,0xec,0x28,0x80,0x3d,0xe7,0xf1,0x9b,0x04,0x01,0x75,0x16};
- constexpr unsigned char storeRefresh[]={0x48,0x83,0xec,0x28,0x80,0x3d,0x57,0xa6,0x9e,0x04,0x01,0x75,0x16};
- auto rt=base+build::rva(0x1cbfa60);
- if(store?std::memcmp(rt,storeRefresh,sizeof(storeRefresh)):std::memcmp(rt,refresh,sizeof(refresh)))return false;
- auto init=MH_Initialize();if(init!=MH_OK&&init!=MH_ERROR_ALREADY_INITIALIZED)return false;
- if(MH_CreateHook(wt,reinterpret_cast<void*>(&renderWidth),nullptr)!=MH_OK)return false;
- if(MH_CreateHook(ht,reinterpret_cast<void*>(&renderHeight),nullptr)!=MH_OK){MH_RemoveHook(wt);return false;}
- if(MH_CreateHook(rt,reinterpret_cast<void*>(&refreshRenderExtent),reinterpret_cast<void**>(&nativeRefreshExtent))!=MH_OK){MH_RemoveHook(wt);MH_RemoveHook(ht);return false;}
- eyeWidth=width;eyeHeight=height;
- renderImageBase=reinterpret_cast<uintptr_t>(base);
- if(MH_EnableHook(wt)==MH_OK&&MH_EnableHook(ht)==MH_OK&&MH_EnableHook(rt)==MH_OK){
-  auto slot=reinterpret_cast<void**>(base+build::rva(0x2a1c048));DWORD protection{};
-  if(VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&protection)){
-   nativeClientRect=reinterpret_cast<ClientRect>(*slot);
-   InterlockedExchangePointer(slot,reinterpret_cast<void*>(&renderClientRect));DWORD ignored{};VirtualProtect(slot,sizeof(void*),protection,&ignored);
-   refreshRenderExtent();
-   log("ETERNAL_RENDER_EXTENT "+std::to_string(width)+"x"+std::to_string(height)+" engineAccessors=1 swapchainClientQueries=2 sceneRefresh=1");return true;
-  }
- }
- MH_DisableHook(wt);MH_DisableHook(ht);MH_DisableHook(rt);MH_RemoveHook(wt);MH_RemoveHook(ht);MH_RemoveHook(rt);eyeWidth=eyeHeight=0;return false;
- }catch(...){return false;}}
 bool install() noexcept {try{
+ std::lock_guard<std::mutex> installationLock(installationMutex);
  if(installed)return true;
  if(!approvedImage()){log("ETERNAL_HOOK refused: unsupported executable hash");return false;}
  auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
@@ -479,14 +419,14 @@ bool install() noexcept {try{
  if(!std::memcmp(finalizeTarget,finalizeBytes,sizeof(finalizeBytes))&&
     MH_CreateHook(finalizeTarget,reinterpret_cast<void*>(&finalizeCamera),reinterpret_cast<void**>(&originalFinalizeCamera))==MH_OK){
   fovGuardOk=MH_EnableHook(finalizeTarget)==MH_OK;
-  if(!fovGuardOk)MH_RemoveHook(finalizeTarget);
+  if(!fovGuardOk)removeOwnedCameraHook(finalizeTarget);
  }
- log("ETERNAL_ANIMATION_FOV installed="+std::to_string(fovGuardOk));
+ try{log("ETERNAL_ANIMATION_FOV installed="+std::to_string(fovGuardOk));}catch(...){}
 #ifndef ARGENT_CAMERA_TESTING
  const bool playerOk=player::install(base),presentationOk=presentation::install(base);
- if(!revenant::install(base))log("ETERNAL_REVENANT unavailable: native contract rejected");
+ if(!revenant::install(base))try{log("ETERNAL_REVENANT unavailable: native contract rejected");}catch(...){}
  const bool hudOk=hud::installWeaponWheel(base),hitOk=hud::installHitMarkerSuppression(base);
- log("ETERNAL_BUILD_HOOKS player="+std::to_string(playerOk)+" presentation="+std::to_string(presentationOk)+" hud="+std::to_string(hudOk)+" hitmarkers="+std::to_string(hitOk));
+ try{log("ETERNAL_BUILD_HOOKS player="+std::to_string(playerOk)+" presentation="+std::to_string(presentationOk)+" hud="+std::to_string(hudOk)+" hitmarkers="+std::to_string(hitOk));}catch(...){}
 #endif
  // Both functions are covered by approvedImage; also check full entry bytes.
  constexpr unsigned char pollBytes[]={0x48,0x89,0x5c,0x24,0x18,0x57,0x48,0x83,0xec,0x40};
@@ -495,9 +435,10 @@ bool install() noexcept {try{
   discover=reinterpret_cast<Discover>(base+build::rva(0x1dc48f0));
   const auto result=MH_CreateHook(base+build::rva(0x1dc57a0),reinterpret_cast<void*>(&pollController),reinterpret_cast<void**>(&originalPoll));
   const bool enabled=result==MH_OK&&MH_EnableHook(base+build::rva(0x1dc57a0))==MH_OK;
-  log("ETERNAL_INPUT_DISCOVERY installed="+std::to_string(enabled));
+  if(result==MH_OK&&!enabled)removeOwnedCameraHook(base+build::rva(0x1dc57a0));
+  try{log("ETERNAL_INPUT_DISCOVERY installed="+std::to_string(enabled));}catch(...){}
  }
- log("ETERNAL_HOOK installed verified camera setter; 6DoF view, unitsPerMeter="+std::to_string(unitsPerMeter())+"; dormant in quad; physics body unchanged");return true;
+ try{log("ETERNAL_HOOK installed verified camera setter; 6DoF view, unitsPerMeter="+std::to_string(unitsPerMeter())+"; dormant in quad; physics body unchanged");}catch(...){}return true;
  }catch(...){return false;}}
 void stop() noexcept {
  {std::lock_guard<std::mutex> lock(poseMutex);++weaponEpoch;input::weaponApplied({});placedWorldHands={};active=false;needReference=true;needPositionReference=true;translate=false;historyCursor=0;matchedSerial=0;follow={};bodyValid=false;anchorOwner=0;animationActive=false;input::followStick({});input::followTurn(0);yawFollow={};}
