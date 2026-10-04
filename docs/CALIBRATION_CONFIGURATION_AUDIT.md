@@ -13,6 +13,7 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `61b8021` | Launcher controls snapshot persistence | Stability | Read a complete native snapshot before formatting/replacement; reject failed streams and preserve normal CRLF output. |
 | `4b99ee3` | Hand-pose calibration loading | Stability | Accept commented authored defaults and publish only complete, validated row overlays; preserve the prior map and preview on failure. |
 | `6418ac7` | Weapon-pose calibration loading | Stability | Reuse the complete native reader and transactional row parser; preserve shipped/saved precedence, existing pose limits and one-time loading. |
+| `d8a0c46` | Legacy hand calibration loading | Stability | Validate complete native key/value input and publish global/per-weapon wrists together; contain optional diagnostics and retain legacy inheritance. |
 
 ## Configuration Publication
 
@@ -223,12 +224,40 @@ fault hooks active; existing support persistence, apply/save and player-mechanic
 checks pass. The full incremental build and all 129 harness checks pass in
 106.90 seconds. No average-FPS gain is claimed.
 
+## Legacy Hand Calibration Loading
+
+The legacy loader published global wrist fields before validating named profiles
+and silently skipped invalid fields. Valid prefixes and trailing numeric/text
+junk could therefore change a partial calibration. Default fallback and successful
+load logging could also throw out of this optional loader. The original extracted
+production method fails fifteen of 26 initial scenarios.
+
+The loader now uses complete native reads and candidate wrist/profile arrays.
+Known vectors must contain three finite numbers and no unexpected suffix;
+blank lines, leading/inline numeric comments, CRLF, duplicate keys, complete
+unknown settings and final rows without newline remain supported. Malformed
+key/value rows and unsupported explicit versions reject the file. Missing-version
+and v1 saves still reset weapon wrists from the accepted globals; partial v2 saves
+retain unrelated defaults. Missing default files still inherit model wrists,
+but other read failures preserve the preceding calibration. Optional exceptions
+and logging failures cannot escape or interrupt accepted publication.
+
+All 27 final production-method cases pass, including checked-in global wrists,
+model scale preservation, inheritance/overlay distinctions, malformed prefixes,
+invalid named vectors, unsupported versions, native active writers, retry and
+pending-preview preservation. The controlled native read fault after a valid
+prefix is injected only into the fixed reader, not the original CRT path.
+Renderer/layer targets compile and the focused check passes in 0.08 seconds.
+The full incremental build and all 130 checks pass in 108.71 seconds. Model
+configuration loading remains to inspect;
+no per-frame I/O or average-FPS improvement is claimed.
+
 ## Verification Limits
 
 All eleven configuration boundaries, six support persistence, twenty reload,
-eight hand-save, seventeen launcher controls-save/formatter, 22 hand-pose and
-25 weapon-pose load/resolution cases pass. All 129 harness checks pass in
-106.90 seconds after a full incremental rebuild, including native launcher
+eight hand-save, seventeen launcher controls-save/formatter, 27 legacy hand,
+22 hand-pose and 25 weapon-pose load/resolution cases pass. All 130 checks pass
+in 108.71 seconds after a full incremental rebuild, including native launcher
 flush verification and the existing presentation-policy formatter caller.
 Full raw diffs and relevant unfiltered diagnostics were inspected. Existing build
 warnings concern debug/assertion definitions and macro redefinitions.
@@ -243,7 +272,7 @@ real temporary files, with controlled native read faults and optional logging.
 It does not include the complete controller action update or execute a native
 OpenXR session. Remaining action polling and other diagnostic boundaries still
 need verification.
-Model/legacy calibration load validation, full hand polling, launcher legacy-load
+Model calibration load validation, full hand polling, launcher legacy-load
 and broader save/apply completion remain pending. Native game/headset,
 package and combined gameplay FPS validation remain unverified; no audit
 completion or FPS improvement is claimed for these persistence changes.
