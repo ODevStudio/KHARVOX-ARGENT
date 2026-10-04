@@ -8,6 +8,8 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `486f435` | Support and weapon calibration persistence | Stability | Publish support presets only after successful replacement; reject unavailable paths and check final stream state after close. |
 | `9ae6579` | Weapon configuration stream state | Stability | Reject already-exhausted input instead of publishing defaults. |
 | `936dc41` | Controller configuration and support reload | Stability | Require complete native reads, replace support snapshots and isolate diagnostic failures after complete state publication. |
+| `80c79ef` | Hand calibration save completion | Stability | Check final stream state after close before replacing the file or publishing the draft. |
+| `bd22fd1` | Launcher INI persistence verification | Stability | Verify native zero-return flush semantics, disk contents and snapshot replacement; no runtime change. |
 
 ## Configuration Publication
 
@@ -82,11 +84,52 @@ binary fixture writes repair that mismatch without changing production behavior.
 Actual disk/controller/headset failures and host-allocation injection remain
 outside these checks.
 
+## Hand Calibration Save Completion
+
+The hand writer checked stream success before close, unlike the corrected weapon
+and support writers. A close-only failure could therefore replace the saved file,
+publish the candidate map and clear pending edits while reporting success.
+`saveCalibration` now closes before checking the final stream state. Replacement
+and draft publication remain conditional on success, with no additional frame work.
+
+The production method is included from `HandCalibrationSave.inc` in both the
+renderer and a bounded fixture using the real `Draft<HandCalibration>` type.
+The original method fails the close-only scenario; all eight final scenarios pass:
+initial save, round trip, write/flush/close faults, real locked-destination and
+temporary-open failures, and retry. Rejected saves preserve destination bytes,
+committed profiles and pending edits. Successful saves preserve unrelated profiles.
+Stream faults are controlled status injection, not actual disk failure.
+
+The unchanged public renderer methods move to `HandRendererRuntime.inc` to keep
+the touched renderer below the file-size limit: 681 lines in the main file and
+304 in the include. Their content matches the original after newline normalization.
+Both eye-layout GPU checks, retirement, framebuffer and weapon-calibration checks
+pass: six focused checks in 19.92 seconds. Both renderer users and layer units
+compile. Full keyboard polling and the public configure/apply acknowledgement
+through a native session are not exercised by this save fixture.
+
+## Launcher INI Flush Semantics
+
+Microsoft's `WritePrivateProfileStringW` documentation explicitly permits a zero
+return when flushing the cached INI. An all-null flush cannot be checked like an
+ordinary key write. The isolated native check observes zero and last error 2
+despite complete UTF-16 disk contents and successful atomic replacement/reload.
+Unknown keys survive copying and updating the snapshot; a normal key write to an
+unavailable parent correctly fails. Requiring a nonzero flush return would reject
+successful saves, so the production launcher is deliberately unchanged.
+
+Source: [Microsoft API return-value contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-writeprivateprofilestringw).
+`launcher_profile_flush` passes in 0.08 seconds. It exercises Windows APIs with
+isolated files, not the complete GUI save path or real disk/cache faults.
+The old controls-file read, unknown-key preservation after failed input, and
+broader launcher save/apply boundaries remain to inspect.
+
 ## Verification Limits
 
-All eleven configuration boundaries, six support persistence and twenty reload
-cases pass. The final five-check focused run passes in 0.19 seconds; all 123
-harness checks pass in 107.17 seconds after rebuilding production and test targets.
+All eleven configuration boundaries, six support persistence, twenty reload and
+eight hand-save cases pass. The final hand/calibration six-check run passes in
+19.92 seconds; all 125 harness checks pass in 106.44 seconds after a full
+incremental rebuild, including the native launcher flush contract check.
 Full raw diffs and relevant unfiltered diagnostics were inspected. Existing build
 warnings concern debug/assertion definitions and macro redefinitions.
 
@@ -100,7 +143,7 @@ real temporary files, with controlled native read faults and optional logging.
 It does not include the complete controller action update or execute a native
 OpenXR session. Remaining action polling and other diagnostic boundaries still
 need verification.
-Hand-renderer close-result handling and launcher INI flush-result handling also
-remain pending. The existing 994-line hand renderer was not broadly restructured
-for this bounded configuration/support change. Native game/headset, package and
-combined gameplay FPS validation remain unverified; no audit completion is claimed.
+Hand/model calibration load validation, full hand polling, launcher controls-file
+reads and broader save/apply completion remain pending. Native game/headset,
+package and combined gameplay FPS validation remain unverified; no audit
+completion or FPS improvement is claimed for these persistence changes.
