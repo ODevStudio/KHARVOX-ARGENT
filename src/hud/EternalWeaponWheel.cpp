@@ -41,11 +41,11 @@ void __fastcall drawSwf(void* swf,void* canvas,uint64_t time){
   static std::atomic<ULONGLONG> noted{};
   const auto now=GetTickCount64();auto previous=noted.load();
   if(now-previous>1000&&noted.compare_exchange_strong(previous,now))
-   log("ETERNAL_HUD hidden=1 stage=swf-draw timeline=preserved");
+   try{log("ETERNAL_HUD hidden=1 stage=swf-draw timeline=preserved");}catch(...){}
   return;
  }
  if(drawCalibrationPreview(swf,canvas,time))return;
- captureMarkerCanvas(canvas);
+ try{captureMarkerCanvas(canvas);}catch(...){}
  originalDrawSwf(swf,canvas,time);
 }
 using Canvas=void(__fastcall*)(void*,int,int,float,float);
@@ -81,6 +81,7 @@ bool singleObjective(void* owner){
  return visible==1;
 }
 uintptr_t __fastcall submitGeometry(void* context,void* entity,int flags){
+ try{
  GeometryOwner owned{};int role=-1;
  {std::lock_guard<std::mutex> lock(geometryMutex);const auto now=GetTickCount64();
   for(size_t i=0;i<geometryOwners.size();++i){const auto& o=geometryOwners[i];if(o.entity==entity&&entity&&now>=o.tick&&now-o.tick<100){owned=o;role=int(i);break;}}
@@ -112,7 +113,7 @@ uintptr_t __fastcall submitGeometry(void* context,void* entity,int flags){
    if(handRole(role))camera::publishHudPanels(owned.frame,role,panels);
    static std::array<std::atomic<ULONGLONG>,roles.size()> noted{};const auto now=GetTickCount64();auto previous=noted[role].load();
    if(now-previous>5000&&noted[role].compare_exchange_strong(previous,now)&&(extendedLogging()||!previous)){
-    log("ETERNAL_HUD_GRAPHIC role="+std::string(roles[role].name)+" corrected="+std::to_string(corrected)+" vertices="+std::to_string(count)+" surfaces="+std::to_string(surfaceCount)+" indices="+std::to_string(indices)+" canvas="+std::to_string(owned.width)+","+std::to_string(owned.height)+" bounds="+std::to_string(bounds.minX)+","+std::to_string(bounds.minY)+","+std::to_string(bounds.maxX)+","+std::to_string(bounds.maxY));
+    try{log("ETERNAL_HUD_GRAPHIC role="+std::string(roles[role].name)+" corrected="+std::to_string(corrected)+" vertices="+std::to_string(count)+" surfaces="+std::to_string(surfaceCount)+" indices="+std::to_string(indices)+" canvas="+std::to_string(owned.width)+","+std::to_string(owned.height)+" bounds="+std::to_string(bounds.minX)+","+std::to_string(bounds.minY)+","+std::to_string(bounds.maxX)+","+std::to_string(bounds.maxY));}catch(...){}
    }
   }
  }
@@ -125,8 +126,9 @@ uintptr_t __fastcall submitGeometry(void* context,void* entity,int flags){
   GraphicBounds b;const bool corrected=submittedGraphicBounds(buffer,count,reinterpret_cast<const uint16_t*>(buffer+0xc0000),indices,surfaces,surfaceCount,b)&&billboardDistanceMarker(buffer,count,b,marker.canvas);
   static std::atomic<ULONGLONG> noted{};const auto now=GetTickCount64();auto previous=noted.load();
   if(now-previous>5000&&noted.compare_exchange_strong(previous,now)&&(extendedLogging()||!previous))
-   log("ETERNAL_DISTANCE_MARKER corrected="+std::to_string(corrected)+" ratio=0.333333 upright=1 artworkBounds="+std::to_string(b.minX)+","+std::to_string(b.minY)+","+std::to_string(b.maxX)+","+std::to_string(b.maxY));
+   try{log("ETERNAL_DISTANCE_MARKER corrected="+std::to_string(corrected)+" ratio=0.333333 upright=1 artworkBounds="+std::to_string(b.minX)+","+std::to_string(b.minY)+","+std::to_string(b.maxX)+","+std::to_string(b.maxY));}catch(...){}
  }}
+ }catch(...){}
  return originalSubmit(context,entity,flags);
 }
 
@@ -143,7 +145,7 @@ void __fastcall updatePoiEntry(void* owner,void* view,void* entry,void* declarat
   PreviewValueScope<float> scaled(scale,objectiveScale(scale,true,true));
   originalPoiEntry(owner,view,entry,declaration,group);
   static std::atomic<ULONGLONG> noted{};const auto now=GetTickCount64();auto previous=noted.load();
-  if(now-previous>2000&&noted.compare_exchange_strong(previous,now))log("ETERNAL_DISTANCE_MARKER nativeEntry=1 name="+std::string(name)+" ratio=0.333333 symbolAndText=1");
+  if(now-previous>2000&&noted.compare_exchange_strong(previous,now))try{log("ETERNAL_DISTANCE_MARKER nativeEntry=1 name="+std::string(name)+" ratio=0.333333 symbolAndText=1");}catch(...){}
  }else originalPoiEntry(owner,view,entry,declaration,group);
 }
 std::atomic<bool> wheelVisible{};
@@ -191,8 +193,8 @@ void loadCalibration(){
   next[index]=c;
  }
  stamp=info.ftLastWriteTime;
- if(ok){calibrations=next;log("ETERNAL_HUD calibration loaded assets/argent_hud.cfg");}
- else log("ETERNAL_HUD invalid calibration retained previous values");
+ if(ok){calibrations=next;try{log("ETERNAL_HUD calibration loaded assets/argent_hud.cfg");}catch(...){}}
+ else try{log("ETERNAL_HUD invalid calibration retained previous values");}catch(...){}
 }
 struct Pending {void* entity{};int role=-1;Source source{};Calibration calibration{};float eye[3]{},head[9]{},grip[3]{},hand[9]{};bool handBound{};HandPanel panel{};HandHudGroup group{};uint64_t frame{};bool marker{};DistanceMarkerCanvas markerCanvas;bool markerCanvasReady{};};
 thread_local Pending pending;
@@ -205,6 +207,9 @@ void captureMarkerCanvas(void* canvas){
  std::lock_guard<std::mutex> lock(geometryMutex);markerGeometry=next;
 }
 void __fastcall update(void* owner,const float* position,const float* axis,void* entity,void* time){
+ const int index=owner?roleIndex(build::semanticRva(*static_cast<const uintptr_t*>(owner)-image)):-1;
+ const bool preview=previewEligible(index);
+ try{
  if(owner){
   std::lock_guard<std::mutex> lock(stateMutex);
   const auto now=GetTickCount64();
@@ -214,8 +219,6 @@ void __fastcall update(void* owner,const float* position,const float* axis,void*
   }
   animationHudOwners[uintptr_t(owner)+0x10]={*static_cast<const uintptr_t*>(owner),now};
  }
- int index=owner?roleIndex(build::semanticRva(*static_cast<const uintptr_t*>(owner)-image)):-1;
- const bool preview=previewEligible(index);
  if(index>=0&&position&&axis){
   {std::lock_guard<std::mutex> lock(stateMutex);loadCalibration();auto& s=sources[index];s.owner=uintptr_t(owner);s.tick=GetTickCount64();std::memcpy(s.eye,position,sizeof(s.eye));std::memcpy(s.axis,axis,sizeof(s.axis));}
   auto bytes=static_cast<unsigned char*>(owner);auto gui=bytes+0x10;float eye[3]{},basis[9]{};
@@ -225,6 +228,7 @@ void __fastcall update(void* owner,const float* position,const float* axis,void*
    createCanvas(gui,0,false,1.f);log("ETERNAL_HUD role="+std::string(roles[index].name)+" flat-to-world created="+std::to_string(*reinterpret_cast<void**>(gui+8)!=nullptr));
   }
  }
+ }catch(...){}
  if(preview){PreviewValueScope<unsigned char> visible(*(static_cast<unsigned char*>(owner)+0xb8),1);originalUpdate(owner,position,axis,entity,time);}
  else originalUpdate(owner,position,axis,entity,time);
  if(index==0){wheelVisible=static_cast<unsigned char*>(owner)[0xb8]!=0;wheelVisibleTick=GetTickCount64();}
@@ -333,7 +337,7 @@ void __fastcall canvas(void* entity,int width,int height,float extentX,float ext
   if(extendedLogging()){
    static thread_local std::array<ULONGLONG,roles.size()> noted{};const auto now=GetTickCount64();
    if(now-noted[pending.role]>=5000){noted[pending.role]=now;
-    log("ETERNAL_HUD role="+std::string(roles[pending.role].name)+" corrected="+std::to_string(corrected)+" canvas="+std::to_string(width)+"x"+std::to_string(height)+" distanceMeters="+std::to_string(pending.calibration.distance)+" scale="+std::to_string(pending.calibration.scale)+" extents="+std::to_string(extentX)+","+std::to_string(extentY));
+    try{log("ETERNAL_HUD role="+std::string(roles[pending.role].name)+" corrected="+std::to_string(corrected)+" canvas="+std::to_string(width)+"x"+std::to_string(height)+" distanceMeters="+std::to_string(pending.calibration.distance)+" scale="+std::to_string(pending.calibration.scale)+" extents="+std::to_string(extentX)+","+std::to_string(extentY));}catch(...){}
    }
   }
  }
@@ -439,7 +443,7 @@ void pollHandCalibration(bool enabled,bool leftMode){
  {std::lock_guard<std::mutex> lock(stateMutex);handPanels=panels;}
  nextStep=now+100;log("ETERNAL_HUD calibration saved role="+std::string(roles[r].name)+" leftMode="+std::to_string(leftMode));
 }
-bool installWeaponWheel(unsigned char* base) noexcept {
+bool installWeaponWheel(unsigned char* base) noexcept {try{
  constexpr unsigned char updateBytes[]={0x40,0x53,0x55,0x41,0x54,0x41,0x56,0x41,0x57,0x48,0x81,0xec,0xc0,0,0,0};
  constexpr unsigned char renderBytes[]={0x4c,0x8b,0xdc,0x55,0x53,0x41,0x54,0x41,0x56};
  constexpr unsigned char drawBytes[]={0x4c,0x8b,0xdc,0x49,0x89,0x53,0x10,0x55,0x53,0x41,0x55,0x41,0x56};
@@ -450,10 +454,9 @@ bool installWeaponWheel(unsigned char* base) noexcept {
     std::memcmp(base+build::rva(0x157ca10),renderBytes,sizeof(renderBytes))||std::memcmp(base+build::rva(0x194f840),canvasBytes,sizeof(canvasBytes))||
     std::memcmp(base+build::rva(0x157c400),createBytes,sizeof(createBytes))||
     *reinterpret_cast<uintptr_t*>(base+build::rva(0x2d03ea8)+39*8)!=uintptr_t(base+build::rva(0xecfea0))){
-  log("ETERNAL_WEAPON_WHEEL refused: signature/vtable mismatch");return false;
+  try{log("ETERNAL_WEAPON_WHEEL refused: signature/vtable mismatch");}catch(...){}return false;
  }
  image=uintptr_t(base);
- installTutorialBindings(base);
  constexpr unsigned char poiBytes[]={0x40,0x55,0x56,0x41,0x55,0x41,0x56,0x41,0x57};
  const bool poiSignature=std::memcmp(base+build::rva(0xeee970),poiBytes,sizeof(poiBytes))==0;
  // r110's native movie clone produced no usable preview. Placeholders are
@@ -462,26 +465,29 @@ bool installWeaponWheel(unsigned char* base) noexcept {
  loadHandPanels();
  calibrations[0].scale=kharvox::weaponWheelWidthMeters;
  createCanvas=reinterpret_cast<CreateCanvas>(base+build::rva(0x157c400));
- bool ok=MH_CreateHook(base+build::rva(0x15ef980),reinterpret_cast<void*>(&update),reinterpret_cast<void**>(&originalUpdate))==MH_OK;
+ void* const targets[]{base+build::rva(0x15ef980),base+build::rva(0x157ca10),base+build::rva(0x194f840),base+build::rva(0x194cb20),base+build::rva(0x182e610)};
+ void* const detours[]{reinterpret_cast<void*>(&update),reinterpret_cast<void*>(&render),reinterpret_cast<void*>(&canvas),reinterpret_cast<void*>(&submitGeometry),reinterpret_cast<void*>(&drawSwf)};
+ void** const originals[]{reinterpret_cast<void**>(&originalUpdate),reinterpret_cast<void**>(&originalRender),reinterpret_cast<void**>(&originalCanvas),reinterpret_cast<void**>(&originalSubmit),reinterpret_cast<void**>(&originalDrawSwf)};
+ size_t created{};
+ for(;created<std::size(targets);++created)if(MH_CreateHook(targets[created],detours[created],originals[created])!=MH_OK)break;
+ bool ok=created==std::size(targets);
+ if(ok)for(size_t i=created;i>0;--i)if(MH_EnableHook(targets[i-1])!=MH_OK){ok=false;break;}
+ if(!ok){for(size_t i=created;i>0;--i){MH_DisableHook(targets[i-1]);MH_RemoveHook(targets[i-1]);}}
  if(ok&&poiSignature){
   nativeMarkerScale=MH_CreateHook(base+build::rva(0xeee970),reinterpret_cast<void*>(&updatePoiEntry),reinterpret_cast<void**>(&originalPoiEntry))==MH_OK;
-  if(nativeMarkerScale)nativeMarkerScale=MH_EnableHook(base+build::rva(0xeee970))==MH_OK;
-  if(!nativeMarkerScale)MH_RemoveHook(base+build::rva(0xeee970));
+  if(nativeMarkerScale){nativeMarkerScale=MH_EnableHook(base+build::rva(0xeee970))==MH_OK;
+   if(!nativeMarkerScale)MH_RemoveHook(base+build::rva(0xeee970));}
  }
  if(ok&&previewApiReady){
   previewApiReady=MH_CreateHook(base+build::rva(0x15ef6c0),reinterpret_cast<void*>(&renderOwner),reinterpret_cast<void**>(&originalOwnerRender))==MH_OK;
-  if(previewApiReady)previewApiReady=MH_EnableHook(base+build::rva(0x15ef6c0))==MH_OK;
-  if(!previewApiReady)MH_RemoveHook(base+build::rva(0x15ef6c0));
+  if(previewApiReady){previewApiReady=MH_EnableHook(base+build::rva(0x15ef6c0))==MH_OK;
+   if(!previewApiReady)MH_RemoveHook(base+build::rva(0x15ef6c0));}
  }
- if(ok)ok=MH_CreateHook(base+build::rva(0x157ca10),reinterpret_cast<void*>(&render),reinterpret_cast<void**>(&originalRender))==MH_OK;
- if(ok)ok=MH_CreateHook(base+build::rva(0x194f840),reinterpret_cast<void*>(&canvas),reinterpret_cast<void**>(&originalCanvas))==MH_OK;
- if(ok)ok=MH_CreateHook(base+build::rva(0x194cb20),reinterpret_cast<void*>(&submitGeometry),reinterpret_cast<void**>(&originalSubmit))==MH_OK;
- if(ok)ok=MH_CreateHook(base+build::rva(0x182e610),reinterpret_cast<void*>(&drawSwf),reinterpret_cast<void**>(&originalDrawSwf))==MH_OK;
- if(ok)ok=MH_EnableHook(base+build::rva(0x182e610))==MH_OK&&MH_EnableHook(base+build::rva(0x194cb20))==MH_OK&&MH_EnableHook(base+build::rva(0x194f840))==MH_OK&&MH_EnableHook(base+build::rva(0x157ca10))==MH_OK&&MH_EnableHook(base+build::rva(0x15ef980))==MH_OK;
- if(!ok){previewApiReady=false;nativeMarkerScale=false;for(auto rva:{0xeee970,0x15ef6c0,0x15ef980,0x157ca10,0x194f840,0x194cb20,0x182e610}){MH_DisableHook(base+build::rva(rva));MH_RemoveHook(base+build::rva(rva));}}
- log("ETERNAL_DISTANCE_MARKER nativeScaleInstalled="+std::to_string(nativeMarkerScale));
- log("ETERNAL_HUD_PREVIEW installed="+std::to_string(previewApiReady)+" scope=selected-calibration-role");
- log(std::string("ETERNAL_WEAPON_WHEEL installed=")+(ok?"1":"0")+" policy=KHARVOX final-canvas-center");return ok;
+ if(ok)installTutorialBindings(base);
+ try{log("ETERNAL_DISTANCE_MARKER nativeScaleInstalled="+std::to_string(nativeMarkerScale));}catch(...){}
+ try{log("ETERNAL_HUD_PREVIEW installed="+std::to_string(previewApiReady)+" scope=selected-calibration-role");}catch(...){}
+ try{log(std::string("ETERNAL_WEAPON_WHEEL installed=")+(ok?"1":"0")+" policy=KHARVOX final-canvas-center");}catch(...){}return ok;
+ }catch(...){return false;}
 }
 }
 
