@@ -138,7 +138,22 @@ public:
  void forgetBuffer(VkBuffer h){std::lock_guard<std::mutex> l(mutex);buffers.erase(h);}
  void layout(VkDescriptorSetLayout h,const VkDescriptorSetLayoutCreateInfo& i){std::lock_guard<std::mutex> l(mutex);auto& d=layouts[h];d.clear();for(uint32_t n=0;n<i.bindingCount;++n){auto& b=i.pBindings[n];if(b.descriptorType==VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC||b.descriptorType==VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)for(uint32_t j=0;j<b.descriptorCount;++j)d[{b.binding,j}]=0;}uint32_t n=0;for(auto& v:d)v.second=n++;}
  void forgetLayout(VkDescriptorSetLayout h){std::lock_guard<std::mutex> l(mutex);layouts.erase(h);}
- void allocateSets(const VkDescriptorSetAllocateInfo& i,const VkDescriptorSet* out){std::lock_guard<std::mutex> l(mutex);for(uint32_t n=0;n<i.descriptorSetCount;++n)sets[out[n]]={i.descriptorPool,{},layouts[i.pSetLayouts[n]]};}
+ using SetNodes=std::vector<decltype(sets)::node_type>;
+ SetNodes prepareSets(const VkDescriptorSetAllocateInfo& info){
+  std::lock_guard<std::mutex> lock(mutex);SetNodes nodes;nodes.reserve(info.descriptorSetCount);
+  decltype(sets) prepared;
+  for(uint32_t i=0;i<info.descriptorSetCount;++i){
+   Set set;set.pool=info.descriptorPool;const auto layout=layouts.find(info.pSetLayouts[i]);
+   if(layout!=layouts.end())set.dynamic=layout->second;
+   prepared.emplace(VK_NULL_HANDLE,std::move(set));nodes.push_back(prepared.extract(prepared.begin()));
+  }
+  return nodes;
+ }
+ void publishSets(SetNodes& nodes,const VkDescriptorSet* handles){
+  std::lock_guard<std::mutex> lock(mutex);
+  for(size_t i=0;i<nodes.size();++i){nodes[i].key()=handles[i];sets.erase(handles[i]);sets.insert(std::move(nodes[i]));}
+ }
+ void allocateSets(const VkDescriptorSetAllocateInfo& info,const VkDescriptorSet* out){auto nodes=prepareSets(info);publishSets(nodes,out);}
  void freeSets(uint32_t n,const VkDescriptorSet* out){std::lock_guard<std::mutex> l(mutex);for(uint32_t j=0;j<n;++j)sets.erase(out[j]);}
  void pool(VkDescriptorPool p){std::lock_guard<std::mutex> l(mutex);for(auto it=sets.begin();it!=sets.end();)if(it->second.pool==p)it=sets.erase(it);else ++it;}
  void update(uint32_t count,const VkWriteDescriptorSet* writes,uint32_t copies,const VkCopyDescriptorSet* copy){

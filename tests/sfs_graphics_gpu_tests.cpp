@@ -19,11 +19,39 @@
 #include <atomic>
 #include <fstream>
 #include <future>
+#include <algorithm>
+#include <chrono>
 #include "../src/openxr/GameImageLifetime.h"
 #ifdef KHARVOX_SFS_RING_RUNTIME
 static PFN_vkGetDeviceProcAddr driverResolver{};
 static VkResult retirementFailure=VK_SUCCESS;
-static unsigned parameterMaps{};
+static VkResult parameterMapFailure=VK_SUCCESS;
+static unsigned parameterMaps{},parameterUnmaps{},parameterFrees{},parameterRetirements{};
+static VkDeviceMemory parameterMemory{};
+static void* parameterData{};
+static bool parameterFreedWhileMapped{};
+static VkImage eyeViewImage{};
+static int eyeViewFailureLayer=-1;
+static VkResult eyeViewFailureResult=VK_SUCCESS;
+static std::array<unsigned,2> eyeViewCreates{},eyeViewDestroys{};
+static std::array<VkImageView,2> checkedEyeViews{};
+static const auto poisonedEyeView=reinterpret_cast<VkImageView>(uintptr_t(0xdead));
+static VKAPI_ATTR VkResult VKAPI_CALL testCreateView(VkDevice device,const VkImageViewCreateInfo* info,const VkAllocationCallbacks* allocator,VkImageView* output){
+ const bool tracked=eyeViewImage&&info->image==eyeViewImage&&info->viewType==VK_IMAGE_VIEW_TYPE_2D;
+ if(tracked){
+  const auto eye=info->subresourceRange.baseArrayLayer;if(eye>1)throw std::runtime_error("Cached view selected an invalid eye");
+  ++eyeViewCreates[eye];
+  if(int(eye)==eyeViewFailureLayer){*output=eyeViewFailureResult==VK_SUCCESS?VK_NULL_HANDLE:poisonedEyeView;return eyeViewFailureResult;}
+ }
+ const auto result=reinterpret_cast<PFN_vkCreateImageView>(driverResolver(device,"vkCreateImageView"))(device,info,allocator,output);
+ if(tracked&&result==VK_SUCCESS)checkedEyeViews[info->subresourceRange.baseArrayLayer]=*output;
+ return result;
+}
+static VKAPI_ATTR void VKAPI_CALL testDestroyView(VkDevice device,VkImageView view,const VkAllocationCallbacks* allocator){
+ if(view==poisonedEyeView)throw std::runtime_error("Cached view destroyed a poisoned native output");
+ if(eyeViewImage)for(unsigned eye=0;eye<2;++eye)if(view==checkedEyeViews[eye])++eyeViewDestroys[eye];
+ reinterpret_cast<PFN_vkDestroyImageView>(driverResolver(device,"vkDestroyImageView"))(device,view,allocator);
+}
 // Exercise the real SFS hooks without requiring a ray-tracing-capable test GPU.
 // Only the synthetic ray commands are consumed here; graphics/compute still
 // execute on the driver and are checked by the image/compute readbacks below.
@@ -55,12 +83,24 @@ static VKAPI_ATTR VkResult VKAPI_CALL testCreatePass(VkDevice device,const VkRen
  return reinterpret_cast<PFN_vkCreateRenderPass>(driverResolver(device,"vkCreateRenderPass"))(device,info,callbacks,pass);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL testRetirement(VkDevice device){
+ ++parameterRetirements;
  if(retirementFailure!=VK_SUCCESS)return retirementFailure;
  return reinterpret_cast<PFN_vkDeviceWaitIdle>(driverResolver(device,"vkDeviceWaitIdle"))(device);
 }
 static VKAPI_ATTR VkResult VKAPI_CALL testMap(VkDevice device,VkDeviceMemory memory,VkDeviceSize offset,VkDeviceSize size,VkMemoryMapFlags flags,void** data){
- ++parameterMaps;
- return reinterpret_cast<PFN_vkMapMemory>(driverResolver(device,"vkMapMemory"))(device,memory,offset,size,flags,data);
+ const bool parameters=size==sizeof(argent::sfs::EyeUniforms);
+ if(parameters){++parameterMaps;parameterMemory=memory;if(parameterMapFailure!=VK_SUCCESS)return parameterMapFailure;}
+ const auto result=reinterpret_cast<PFN_vkMapMemory>(driverResolver(device,"vkMapMemory"))(device,memory,offset,size,flags,data);
+ if(parameters&&result==VK_SUCCESS)parameterData=*data;
+ return result;
+}
+static VKAPI_ATTR void VKAPI_CALL testUnmap(VkDevice device,VkDeviceMemory memory){
+ if(memory==parameterMemory){++parameterUnmaps;parameterData=nullptr;}
+ reinterpret_cast<PFN_vkUnmapMemory>(driverResolver(device,"vkUnmapMemory"))(device,memory);
+}
+static VKAPI_ATTR void VKAPI_CALL testFreeMemory(VkDevice device,VkDeviceMemory memory,const VkAllocationCallbacks* allocator){
+ if(memory==parameterMemory){++parameterFrees;parameterFreedWhileMapped|=parameterData!=nullptr;}
+ reinterpret_cast<PFN_vkFreeMemory>(driverResolver(device,"vkFreeMemory"))(device,memory,allocator);
 }
 static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL testResolver(VkDevice device,const char* name){
  if(!std::strcmp(name,"vkCmdBindPipeline"))return reinterpret_cast<PFN_vkVoidFunction>(testBindPipeline);
@@ -68,7 +108,11 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL testResolver(VkDevice device,con
  if(!std::strcmp(name,"vkCmdPushConstants"))return reinterpret_cast<PFN_vkVoidFunction>(testPush);
  if(!std::strcmp(name,"vkDeviceWaitIdle"))return reinterpret_cast<PFN_vkVoidFunction>(testRetirement);
  if(!std::strcmp(name,"vkMapMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testMap);
+ if(!std::strcmp(name,"vkUnmapMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testUnmap);
+ if(!std::strcmp(name,"vkFreeMemory"))return reinterpret_cast<PFN_vkVoidFunction>(testFreeMemory);
  if(!std::strcmp(name,"vkCreateRenderPass"))return reinterpret_cast<PFN_vkVoidFunction>(testCreatePass);
+ if(!std::strcmp(name,"vkCreateImageView"))return reinterpret_cast<PFN_vkVoidFunction>(testCreateView);
+ if(!std::strcmp(name,"vkDestroyImageView"))return reinterpret_cast<PFN_vkVoidFunction>(testDestroyView);
  return driverResolver(device,name);
 }
 #endif
@@ -79,6 +123,8 @@ static unsigned performanceGpuCommands{},performanceGpuRegions{},performanceGpuF
 namespace argent {void log(const std::string& message){performanceGpuCommands+=message.find("PERF_GPU_COMMAND")!=std::string::npos;performanceGpuRegions+=message.find("PERF_GPU_PASS")!=std::string::npos;performanceGpuFailures+=message.find("PERF_GPU_UNAVAILABLE")!=std::string::npos;std::cout<<message<<std::endl;}}
 #endif
 int main(int argc,char** argv){try{
+ const bool benchmark=argc==4&&std::string(argv[3])=="benchmark";
+ if(benchmark)SetEnvironmentVariableA("ARGENT_SFS_PROFILE_TIMING","1");
  const bool captureTest=argc==4&&std::string(argv[3])=="capture";
  if(captureTest){auto folder=std::filesystem::temp_directory_path()/("argent-sky-hook-test-"+std::to_string(GetCurrentProcessId()));SetEnvironmentVariableW(L"ARGENT_CAPTURE_DIRECTORY",folder.c_str());SetEnvironmentVariableA("ARGENT_WATER_GPU_CAPTURE","1");}
  const bool performanceTest=argc==4&&std::string(argv[3])=="perf";if(performanceTest)SetEnvironmentVariableA("ARGENT_PERFORMANCE_DIAGNOSTICS","1");
@@ -127,7 +173,7 @@ int main(int argc,char** argv){try{
  ok(deviceResult);
 #ifdef KHARVOX_SFS_RING_RUNTIME
  VkPhysicalDeviceMemoryProperties runtimeMemory{};vkGetPhysicalDeviceMemoryProperties(physical,&runtimeMemory);
- check(argc==3||performanceTest||captureTest,"Need vertex and fragment fixtures");
+ check(argc==3||performanceTest||captureTest||benchmark,"Need vertex and fragment fixtures");
  auto readShader=[](const char* path){std::ifstream f(path,std::ios::binary|std::ios::ate);check(bool(f),"Missing shader fixture");std::vector<uint32_t> words(size_t(f.tellg())/4);f.seekg(0);f.read(reinterpret_cast<char*>(words.data()),words.size()*4);return words;};
  auto vertexWords=readShader(argv[1]),fragmentWords=readShader(argv[2]);
  argent::sfs::Configuration configuration{};
@@ -138,7 +184,12 @@ int main(int argc,char** argv){try{
 #endif
  driverResolver=vkGetDeviceProcAddr;
  testDevice=device;
+ parameterMapFailure=VK_ERROR_MEMORY_MAP_FAILED;
+ check(!argent::sfs::initialize(device,physical,testResolver,runtimeMemory,configuration),"SFS accepted a failed parameter map");
+ check(parameterFrees==1&&parameterUnmaps==0&&!parameterData,"Failed parameter mapping leaked memory or unmapped invalid storage");
+ parameterMapFailure=VK_SUCCESS;
  check(argent::sfs::initialize(device,physical,testResolver,runtimeMemory,configuration),"SFS init failed");
+ check(parameterMaps==2&&parameterUnmaps==0&&parameterData,"SFS did not retain its parameter mapping");
  if(performanceTest){VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(physical,&props);argent::sfs::configurePerformanceGpu(device,props.limits.timestampPeriod,uint32_t(families.size()),families.data());}
  auto resolve=[&](const char* name){return argent::sfs::wrapProc(device,name,vkGetDeviceProcAddr(device,name));};
  if(captureTest){
@@ -162,18 +213,18 @@ int main(int argc,char** argv){try{
  XrPosef calibrated{};bool calibratedValid=false;
 #endif
  #ifdef KHARVOX_SFS_RING_RUNTIME
- check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr,nullptr),"Runtime ring init failed");
+ check(argent::sfs::configureSourceRing(device,vkGetDeviceProcAddr,memory,queue,nullptr),"Runtime ring init failed");
  struct RuntimeRing {
   VkDevice device;
   VkResult create(const VkSwapchainCreateInfoKHR& info,VkSwapchainKHR* out){return argent::sfs::createSourceSwapchain(device,info,out);}
   VkResult enumerate(VkSwapchainKHR c,uint32_t* n,VkImage* images){auto r=argent::sfs::sourceImages(device,c,n,images);if(r==VK_SUCCESS&&images)argent::sfs::swapchainImages(device,c,*n,images);return r;}
   VkResult acquire(VkSwapchainKHR c,uint64_t timeout,VkSemaphore sem,VkFence fence,uint32_t* index){return argent::sfs::acquireSource(device,c,timeout,sem,fence,index);}
-  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed){return argent::sfs::presentSource(device,q,info,consumed);}
+  VkResult present(VkQueue q,const VkPresentInfoKHR& info,bool consumed,bool sourceComplete=false){return argent::sfs::presentSource(device,q,info,consumed,sourceComplete);}
   VkResult destroy(VkSwapchainKHR c){argent::sfs::swapchainDestroyed(device,c);argent::sfs::destroySourceSwapchain(device,c);return VK_SUCCESS;}
  } ring{device};
  DEVICE(vkCreateImageView);DEVICE(vkDestroyImageView);DEVICE(vkCreateRenderPass);DEVICE(vkDestroyRenderPass);DEVICE(vkCreateFramebuffer);DEVICE(vkDestroyFramebuffer);DEVICE(vkCmdBeginRenderPass);DEVICE(vkCmdEndRenderPass);
 #else
- argent::sfs::SourceRing ring;check(ring.initialize(device,queue,vkGetDeviceProcAddr,memory,nullptr,nullptr),"Ring init failed");
+ argent::sfs::SourceRing ring;check(ring.initialize(device,queue,vkGetDeviceProcAddr,memory,nullptr),"Ring init failed");
 #endif
  VkSwapchainCreateInfoKHR chainInfo{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};chainInfo.minImageCount=2;chainInfo.imageFormat=VK_FORMAT_R8G8B8A8_UNORM;chainInfo.imageExtent={4,4};chainInfo.imageArrayLayers=2;chainInfo.imageUsage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 #ifdef KHARVOX_SFS_TEST_INDIRECT
@@ -210,6 +261,7 @@ int main(int argc,char** argv){try{
  VkCommandPool pool{};ok(vkCreateCommandPool(device,&poolInfo,nullptr,&pool));VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};allocate.commandPool=pool;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
  VkCommandBuffer command{};ok(vkAllocateCommandBuffers(device,&allocate,&command));
 #ifdef KHARVOX_SFS_RING_RUNTIME
+ #include "SfsEyeViewChecks.inc"
  // Real Vulkan eye views supplied to an external (unmodified) image consumer.
  // Repeated resolution must reuse handles, and never select the other layer.
  argent::dlss::Resource dlssInput{};dlssInput.view=views[0];dlssInput.image=images[0];
@@ -331,11 +383,13 @@ int main(int argc,char** argv){try{
 #endif
  VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore acquired{},rendered{};ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&acquired));ok(vkCreateSemaphore(device,&semaphoreInfo,nullptr,&rendered));
  VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence completed{},acquireFence{};ok(vkCreateFence(device,&fenceInfo,nullptr,&completed));ok(vkCreateFence(device,&fenceInfo,nullptr,&acquireFence));
- auto present=[&](uint32_t index,bool consumed,uint32_t waits){VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;ok(ring.present(queue,info,consumed));ok(perImage);};
+ auto present=[&](uint32_t index,bool consumed,uint32_t waits,bool sourceComplete=false){VkPresentInfoKHR info{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};info.swapchainCount=1;info.pSwapchains=&chain;info.pImageIndices=&index;info.waitSemaphoreCount=waits;info.pWaitSemaphores=waits?&rendered:nullptr;VkResult perImage=VK_NOT_READY;info.pResults=&perImage;ok(ring.present(queue,info,consumed,sourceComplete));ok(perImage);};
  VkPhysicalDeviceProperties timingProperties{};vkGetPhysicalDeviceProperties(physical,&timingProperties);
  kharvox::CopyGpuTiming timing;timing.initialize(device,vkGetDeviceProcAddr,timingProperties.limits.timestampPeriod,families[family].timestampValidBits);
  check(timing.pool!=VK_NULL_HANDLE,"GPU timestamp initialization failed");
- for(uint32_t frame=0;frame<20;++frame){
+ const uint32_t frameCount=benchmark?240:20;
+ std::array<std::vector<double>,2> uniformTimes;
+ for(uint32_t frame=0;frame<frameCount;++frame){
 #ifdef KHARVOX_SFS_RING_RUNTIME
   if(frame==10){
    // The preceding fence retired GPU work. Replace warmed resources, including
@@ -356,7 +410,7 @@ int main(int argc,char** argv){try{
   auto barrier=[&](VkImageLayout oldLayout,VkImageLayout newLayout,VkAccessFlags src,VkAccessFlags dst){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.image=images[index];b.oldLayout=oldLayout;b.newLayout=newLayout;b.srcAccessMask=src;b.dstAccessMask=dst;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,2};vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);};
 #ifdef KHARVOX_SFS_RING_RUNTIME
   VkClearValue initialClear{};VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};passBegin.renderPass=pass;passBegin.framebuffer=framebuffers[index];passBegin.renderArea.extent={4,4};passBegin.clearValueCount=1;passBegin.pClearValues=&initialClear;
-  argent::sfs::FramePose pose;pose.serial=frame+1;argent::sfs::EyeUniforms uniforms{{argent::sfs::identity(),argent::sfs::identity()},{}};
+  argent::sfs::FramePose pose;pose.serial=frame+1;pose.displayTime=100+frame;pose.views[0].pose.position.x=float(frame);argent::sfs::EyeUniforms uniforms{{argent::sfs::identity(),argent::sfs::identity()},{}};
 #ifdef ARGENT_TEST_OPENXR
   XrPosef head{};auto deadline=GetTickCount64()+15000;while(!argent::beginStereoFrame(xrDevice,xrSource,pose,head,GetEnvironmentVariableW(L"ARGENT_TEST_MENU_QUAD",nullptr,0)!=0)){check(GetTickCount64()<deadline,"OpenXR did not become renderable");Sleep(10);}
   if(!calibratedValid){calibrated=head;calibratedValid=true;}
@@ -369,23 +423,48 @@ int main(int argc,char** argv){try{
   uniforms.clipFromCenter[0][12]=-.5f;uniforms.clipFromCenter[1][12]=.5f;
   // Exercise cinematic forward/backward eye offsets without changing expected
   // pixels: normalize projected XY while preserving the native clip depth.
-  if(frame>=10)for(int e=0;e<2;++e){const float w=frame%2?1.25f:.75f;
+  if(frame>=(benchmark?120u:10u))for(int e=0;e<2;++e){const float w=frame%2?1.25f:.75f;
     uniforms.clipFromCenter[e][0]=uniforms.clipFromCenter[e][5]=w;
     uniforms.clipFromCenter[e][12]*=w;uniforms.eyeTranslation[e][3]=w-1;
   }
- #endif
 #endif
+#endif
+  if(frame==3)uniforms.diagnostics[2]=-0.0f;
+  const bool payloadChanged=frame==0||std::memcmp(parameterData,&uniforms,sizeof(uniforms))!=0;
+  if(frame==2){
+   const auto changed=[&]{auto value=uniforms;value.clipFromCenter[0][0]+=.125f;return value;}();
+   std::array<unsigned char,sizeof(uniforms)> before{};std::memcpy(before.data(),parameterData,before.size());
+   argent::sfs::StereoFrame previous;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,previous),"Missing previous image provenance");
+   argent::sfs::prepare(device,pose,changed);retirementFailure=VK_ERROR_DEVICE_LOST;
+   check(argent::sfs::beginFrame(device,chain,index)==VK_ERROR_DEVICE_LOST,"Changed parameters bypassed failed retirement");
+   check(std::memcmp(parameterData,before.data(),before.size())==0,"Failed update changed installed parameter bytes");
+   argent::sfs::StereoFrame preserved;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,preserved)&&preserved.generation==previous.generation&&preserved.pose.displayTime==previous.pose.displayTime,"Failed update advanced image provenance");
+   retirementFailure=VK_SUCCESS;
+  }
   argent::sfs::prepare(device,pose,uniforms);
   if(frame==0){
-   const auto mapsBefore=parameterMaps;
+   std::array<unsigned char,sizeof(argent::sfs::EyeUniforms)> before{};std::memcpy(before.data(),parameterData,before.size());
    retirementFailure=VK_ERROR_DEVICE_LOST;
    check(argent::sfs::beginFrame(device,chain,index)==VK_ERROR_DEVICE_LOST,"Retirement error was swallowed or aborted");
-   check(parameterMaps==mapsBefore,"Failed retirement must not write frame parameters");
+   check(std::memcmp(parameterData,before.data(),before.size())==0,"Failed retirement changed mapped frame parameters");
    argent::sfs::StereoFrame rejected;
    check(!argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,rejected),"Failed retirement published a frame");
    retirementFailure=VK_SUCCESS;
   }
+  const auto retirementsBefore=parameterRetirements;
+  if(!payloadChanged&&!performanceTest)retirementFailure=VK_ERROR_DEVICE_LOST;
+  const auto uniformStart=std::chrono::steady_clock::now();
   ok(argent::sfs::beginFrame(device,chain,index));
+  if(benchmark&&frame%120>=20)uniformTimes[frame/120].push_back(std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-uniformStart).count());
+  retirementFailure=VK_SUCCESS;
+  check(parameterRetirements-retirementsBefore==unsigned(payloadChanged||performanceTest),"Unchanged payload did not elide retirement or diagnostics lost retirement");
+  check(std::memcmp(parameterData,&uniforms,sizeof(uniforms))==0,"Published frame differs from mapped parameter bytes");
+  check(parameterMaps==2&&parameterUnmaps==0,"Frame publication remapped parameter memory");
+  if(frame==1){
+   const auto gated=[&]{auto value=pose;value.serial+=1000;return value;}();argent::sfs::prepare(device,gated,uniforms);
+   ok(argent::sfs::beginFrame(device,chain,index));
+   argent::sfs::StereoFrame current;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,current)&&current.generation==pose.serial,"Unchanged payload bypassed the presentation gate");
+  }
   if(performanceTest)argent::perf::mode.store(2);
   ok(vkResetCommandBuffer(command,0));ok(vkBeginCommandBuffer(command,&begin));timing.begin(command);
   vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,layout,0,1,&set,0,nullptr);
@@ -442,10 +521,13 @@ int main(int argc,char** argv){try{
 #endif
 #ifdef ARGENT_TEST_OPENXR
   argent::sfs::StereoFrame submittedPair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,submittedPair),"No stereo frame for XR");
-  check(argent::presentStereoFrame(xrDevice,submittedPair,1,&rendered),"XR did not consume completed stereo pair");present(index,true,1);
+  const auto handoff=argent::presentStereoFrame(xrDevice,submittedPair,1,&rendered);
+  check(handoff.waitsConsumed&&handoff.sourceComplete,"XR did not complete stereo pair");present(index,handoff.waitsConsumed,1,handoff.sourceComplete);
 #else
-  if(frame%2){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,VK_NULL_HANDLE));}
-  present(index,frame%2,1);
+  const bool sourceComplete=frame%4==3;
+  if(frame%2){VkSubmitInfo consume{VK_STRUCTURE_TYPE_SUBMIT_INFO};consume.waitSemaphoreCount=1;consume.pWaitSemaphores=&rendered;consume.pWaitDstStageMask=&stage;ok(vkQueueSubmit(queue,1,&consume,sourceComplete?completed:VK_NULL_HANDLE));}
+  if(sourceComplete){ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));}
+  present(index,frame%2,1,sourceComplete);
 #endif
   VkSubmitInfo finish{VK_STRUCTURE_TYPE_SUBMIT_INFO};ok(vkQueueSubmit(queue,1,&finish,completed));ok(vkWaitForFences(device,1,&completed,VK_TRUE,10000000000ull));ok(vkResetFences(device,1,&completed));
   double gpuMs{};check(timing.completed(gpuMs)&&std::isfinite(gpuMs)&&gpuMs>=0,"GPU timestamps unavailable after completion");check(!timing.completed(gpuMs),"GPU timestamp sample reused");
@@ -480,13 +562,19 @@ int main(int argc,char** argv){try{
 #ifndef ARGENT_TEST_OPENXR
   for(uint32_t eye=0;eye<2;++eye)for(uint32_t pixel=0;pixel<16;++pixel){const auto offset=eye*64+pixel*4;const bool lit=(pixel%4<2)==(eye==0);check(bytes[offset]==(lit?255:0),"Per-eye projection or multiview pipeline incorrect");}
 #endif
-  argent::sfs::StereoFrame pair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,pair),"No qualified stereo pair");check(pair.generation==pose.serial&&pair.eyes[0].serial==pair.eyes[1].serial&&pair.eyes[1].layer==1,"Frame provenance mismatch");argent::sfs::copyCompleted(device);
+  argent::sfs::StereoFrame pair;check(argent::sfs::pair(device,images[index],{4,4},chainInfo.imageFormat,pair),"No qualified stereo pair");check(pair.generation==pose.serial&&pair.eyes[0].serial==pair.eyes[1].serial&&pair.eyes[1].layer==1,"Frame provenance mismatch");check(pair.pose.displayTime==pose.displayTime&&pair.eyes[0].pose.position.x==pose.views[0].pose.position.x,"Unchanged uniform bytes retained stale pose metadata");argent::sfs::copyCompleted(device);
 
 #ifdef KHARVOX_SFS_TEST_INDIRECT
   for(unsigned eye=0;eye<2;++eye)for(unsigned pixel=0;pixel<16;++pixel)check(std::abs(int(bytes[eye*64+pixel*4+2])-(frame%4?128:32))<=1,"Indirect grid/eye output or pipeline restoration incorrect");
   uint32_t sharedCount{};std::memcpy(&sharedCount,bytes+128,4);check(sharedCount==(frame%4?48u:0u),"Shared-buffer-only indirect work was duplicated");
 #endif
   vkUnmapMemory(device,readback);
+ }
+ if(benchmark)for(size_t group=0;group<uniformTimes.size();++group){
+  auto samples=uniformTimes[group];std::sort(samples.begin(),samples.end());
+  double sum{};for(const auto sample:samples)sum+=sample;
+  std::cout<<"SFS uniform publication benchmark payload="<<(group?"changed":"unchanged")<<" samples="<<samples.size()
+   <<" meanUs="<<sum/samples.size()<<" p50Us="<<samples[samples.size()/2]<<" p95Us="<<samples[samples.size()*95/100]<<'\n';
  }
  // A reset subrange must reset both physical slots. CPU NOT_READY leaves
  // result bytes untouched and still reports zero availability for each query.
@@ -527,10 +615,11 @@ int main(int argc,char** argv){try{
  argent::shutdownXR(device);
 #endif
  argent::sfs::shutdown(device);
+ check(parameterUnmaps==1&&parameterFrees==2&&!parameterData&&!parameterFreedWhileMapped,"Parameter mapping shutdown or failure cleanup is incorrect");
 #endif
 #ifndef ARGENT_TEST_OPENXR
  if(performanceTest)check(performanceGpuCommands>=1&&performanceGpuRegions>=2&&performanceGpuFailures==0,"Real GPU diagnostic readback/regions failed");
 #endif
  vkDestroyDevice(device,nullptr);vkDestroyInstance(instance,nullptr);FreeLibrary(loader);
- std::cout<<"Source ring: 20 frames, both eye readbacks, acquire signals, consumed/unconsumed waits, exhaustion and recreation passed\n";return 0;
+ std::cout<<"Source ring: "<<frameCount<<" frames, both eye readbacks, acquire signals, consumed/unconsumed waits, exhaustion and recreation passed\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

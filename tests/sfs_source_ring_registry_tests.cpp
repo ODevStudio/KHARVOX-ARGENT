@@ -29,7 +29,12 @@ static VKAPI_ATTR VkResult VKAPI_CALL fakeBind(VkDevice, VkImage, VkDeviceMemory
 static VKAPI_ATTR VkResult VKAPI_CALL fakeCreateFence(VkDevice, const VkFenceCreateInfo*, const VkAllocationCallbacks*, VkFence* out) { *out = fresh<VkFence>(); return VK_SUCCESS; }
 static VKAPI_ATTR void VKAPI_CALL fakeDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) {}
 static VKAPI_ATTR VkResult VKAPI_CALL fakeResetFences(VkDevice, uint32_t, const VkFence*) { return VK_SUCCESS; }
-static VKAPI_ATTR VkResult VKAPI_CALL fakeWaitFences(VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t) { return VK_SUCCESS; }
+static std::atomic<bool> blockWait{false}, waitEntered{false};
+static VKAPI_ATTR VkResult VKAPI_CALL fakeWaitFences(VkDevice, uint32_t, const VkFence*, VkBool32, uint64_t) {
+    waitEntered.store(true);
+    while (blockWait.load()) std::this_thread::yield();
+    return VK_SUCCESS;
+}
 static std::atomic<bool> blockSubmit{false}, submitEntered{false};
 static VKAPI_ATTR VkResult VKAPI_CALL fakeSubmit(VkQueue, uint32_t, const VkSubmitInfo*, VkFence) {
     submitEntered.store(true);
@@ -65,13 +70,121 @@ static std::vector<VkImage> imagesOf(SourceRing& ring, VkSwapchainKHR chain) {
     return images;
 }
 
+static void exhaustedAcquireAllowsPresent(const VkPhysicalDeviceMemoryProperties& memory) {
+    SourceRing ring;
+    std::recursive_mutex queueMutex;
+    assert(ring.initialize(reinterpret_cast<VkDevice>(1), reinterpret_cast<VkQueue>(2), &resolver, memory, &queueMutex));
+    VkSwapchainKHR chain{};
+    assert(ring.create(chainInfo(2), &chain) == VK_SUCCESS);
+    std::array<uint32_t, 2> leased{};
+    for (auto& index : leased) {
+        assert(ring.acquire(chain, 0, fresh<VkSemaphore>(), VK_NULL_HANDLE, &index) == VK_SUCCESS);
+    }
+    std::promise<void> started;
+    auto acquiring = std::async(std::launch::async, [&] {
+        started.set_value();
+        uint32_t index{};
+        return ring.acquire(chain, 1000000000, fresh<VkSemaphore>(), VK_NULL_HANDLE, &index);
+    });
+    started.get_future().wait();
+    const bool waiting = acquiring.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout;
+    auto presenting = std::async(std::launch::async, [&] {
+        VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        present.swapchainCount = 1; present.pSwapchains = &chain; present.pImageIndices = &leased[0];
+        return ring.present(reinterpret_cast<VkQueue>(2), present, false);
+    });
+    const bool progressed = presenting.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready;
+    const auto acquired = acquiring.get();
+    const auto presented = presenting.get();
+    ring.clearAfterDeviceIdle();
+    assert(waiting);
+    assert(progressed);
+    assert(acquired == VK_SUCCESS);
+    assert(presented == VK_SUCCESS);
+}
+
+static void submissionsUseSharedQueue(const VkPhysicalDeviceMemoryProperties& memory) {
+    SourceRing ring;
+    std::recursive_mutex queueMutex;
+    assert(ring.initialize(reinterpret_cast<VkDevice>(1), reinterpret_cast<VkQueue>(2), &resolver, memory, &queueMutex));
+    VkSwapchainKHR chain{};
+    assert(ring.create(chainInfo(2), &chain) == VK_SUCCESS);
+    uint32_t index{};
+    std::unique_lock<std::recursive_mutex> queueLock(queueMutex);
+    submitEntered.store(false);
+    std::promise<void> acquireStarted;
+    auto acquiring = std::async(std::launch::async, [&] {
+        acquireStarted.set_value();
+        return ring.acquire(chain, 1000000000, fresh<VkSemaphore>(), VK_NULL_HANDLE, &index);
+    });
+    acquireStarted.get_future().wait();
+    const bool acquireBlocked = acquiring.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout;
+    const bool acquireSubmitted = submitEntered.load();
+    queueLock.unlock();
+    const auto acquired = acquiring.get();
+    queueLock.lock();
+    submitEntered.store(false);
+    std::promise<void> presentStarted;
+    auto presenting = std::async(std::launch::async, [&] {
+        presentStarted.set_value();
+        VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        present.swapchainCount = 1; present.pSwapchains = &chain; present.pImageIndices = &index;
+        return ring.present(reinterpret_cast<VkQueue>(2), present, false);
+    });
+    presentStarted.get_future().wait();
+    const bool presentBlocked = presenting.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout;
+    const bool presentSubmitted = submitEntered.load();
+    queueLock.unlock();
+    const auto presented = presenting.get();
+    ring.clearAfterDeviceIdle();
+    assert(acquireBlocked && !acquireSubmitted && acquired == VK_SUCCESS);
+    assert(presentBlocked && !presentSubmitted && presented == VK_SUCCESS);
+}
+
+static void fenceWaitAllowsQueueUse(const VkPhysicalDeviceMemoryProperties& memory) {
+    SourceRing ring;
+    std::recursive_mutex queueMutex;
+    assert(ring.initialize(reinterpret_cast<VkDevice>(1), reinterpret_cast<VkQueue>(2), &resolver, memory, &queueMutex));
+    VkSwapchainKHR chain{};
+    assert(ring.create(chainInfo(2), &chain) == VK_SUCCESS);
+    for (unsigned n = 0; n < 2; ++n) {
+        uint32_t index{};
+        assert(ring.acquire(chain, 0, fresh<VkSemaphore>(), VK_NULL_HANDLE, &index) == VK_SUCCESS);
+        VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        present.swapchainCount = 1; present.pSwapchains = &chain; present.pImageIndices = &index;
+        assert(ring.present(reinterpret_cast<VkQueue>(2), present, false) == VK_SUCCESS);
+    }
+    blockWait.store(true); waitEntered.store(false);
+    auto acquiring = std::async(std::launch::async, [&] {
+        uint32_t index{};
+        return ring.acquire(chain, 1000000000, fresh<VkSemaphore>(), VK_NULL_HANDLE, &index);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!waitEntered.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    const bool waiting = waitEntered.load();
+    auto queueUser = std::async(std::launch::async, [&] {
+        std::lock_guard<std::recursive_mutex> lock(queueMutex);
+        return true;
+    });
+    const bool progressed = queueUser.wait_for(std::chrono::milliseconds(250)) == std::future_status::ready;
+    blockWait.store(false);
+    const auto acquired = acquiring.get();
+    assert(queueUser.get());
+    ring.clearAfterDeviceIdle();
+    assert(waiting && progressed && acquired == VK_SUCCESS);
+}
+
 int main() {
     VkPhysicalDeviceMemoryProperties memory{};
     memory.memoryTypeCount = 1;
     memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
+    exhaustedAcquireAllowsPresent(memory);
+    submissionsUseSharedQueue(memory);
+    fenceWaitAllowsQueueUse(memory);
+
     SourceRing ring;
-    assert(ring.initialize(reinterpret_cast<VkDevice>(1), reinterpret_cast<VkQueue>(2), &resolver, memory, nullptr, nullptr));
+    assert(ring.initialize(reinterpret_cast<VkDevice>(1), reinterpret_cast<VkQueue>(2), &resolver, memory, nullptr));
 
     // Nothing owned yet; a null image is never owned.
     assert(!ring.ownsImage(VK_NULL_HANDLE));
