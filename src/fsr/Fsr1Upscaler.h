@@ -2,6 +2,7 @@
 
 #include "FsrDispatch.h"
 #include <cstdint>
+#include <vector>
 
 struct Fsr1SourceRect {
     std::int32_t x{};
@@ -24,6 +25,7 @@ public:
                     VkFormat sourceFormat, VkExtent2D sourceExtent,
                     VkExtent2D maximumOutputExtent);
     bool active() const;
+    bool configureStereoSources(VkFormat format, const std::vector<VkImage>& images);
     // Caller must prove all submissions using these images have completed.
     void releaseAfterCompletion();
     void discardRecordedFrame();
