@@ -14,6 +14,7 @@
 #include <fstream>
 #include <mutex>
 #include <unordered_map>
+#include <exception>
 
 namespace argent::dlss {
 namespace {
@@ -27,24 +28,47 @@ struct Pair {void* right{};uint64_t serial{},tick{},samples{},windowSamples{},cp
 std::mutex mutex;
 std::unordered_map<void*,Pair> pairs;
 bool installed{};
-void fallback(const char* reason){
+std::mutex installationMutex;
+struct DlssHookAttempt {
+    const std::array<void*,3>& targets;
+    const std::array<void**,3>& originals;
+    const std::array<void*,3>& previous;
+    size_t created{};
+    bool committed{};
+    ~DlssHookAttempt(){
+        if(committed)return;
+        for(size_t i=created;i>0;--i)if(MH_RemoveHook(targets[i-1])!=MH_OK){RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+        for(size_t i=0;i<created;++i)*originals[i]=previous[i];
+    }
+};
+void fallback(const char* reason) noexcept {
     if(stereoFailed.exchange(true,std::memory_order_relaxed))return;
-    log(std::string("DLSS_STEREO fallback AA=0: ")+reason);
+    try{log(std::string("DLSS_STEREO fallback AA=0: ")+reason);}catch(...){}
     if constexpr(argent::cleanRelease)return;
+    try{
     wchar_t path[32768]{};auto n=GetEnvironmentVariableW(L"ARGENT_LOG",path,32768);
     if(n&&n<32768)std::ofstream(std::filesystem::path(path).parent_path()/"aa-mode.request")<<0;
+    }catch(...){}
+}
+void releaseOwnedHistory(void* handle){
+    const auto result=releaseOriginal(handle);
+    if(result!=success)fallback("right history release failed");
+    try{log("DLSS_STEREO released right history result="+std::to_string(result));}catch(...){}
 }
 Result __fastcall create(VkCommandBuffer command,uint32_t feature,void* params,void** output){
     const auto left=createOriginal(command,feature,params,output);
     if(feature!=1||left!=success||!output||!*output)return left;
     void* right{};const auto result=createOriginal(command,feature,params,&right);
     if(result!=success||!right||right==*output){fallback("independent feature creation failed");return left;}
-    {std::lock_guard<std::mutex> lock(mutex);pairs.emplace(*output,Pair{right});}
-    log("DLSS_STEREO created independent eye histories");return left;
+    bool registered{};
+    try{std::lock_guard<std::mutex> lock(mutex);registered=pairs.emplace(*output,Pair{right}).second;}catch(...){}
+    if(!registered){releaseOwnedHistory(right);fallback("stereo history registration failed");return left;}
+    try{log("DLSS_STEREO created independent eye histories");}catch(...){}
+    return left;
 }
 Result __fastcall release(void* handle){
     void* right{};{std::lock_guard<std::mutex> lock(mutex);auto found=pairs.find(handle);if(found!=pairs.end()){right=found->second.right;pairs.erase(found);}}
-    if(right){auto result=releaseOriginal(right);log("DLSS_STEREO released right history result="+std::to_string(result));}
+    if(right)releaseOwnedHistory(right);
     return releaseOriginal(handle);
 }
 Result __fastcall evaluate(VkCommandBuffer command,void* handle,void* nativeParams,const Parameters* input){
@@ -53,46 +77,61 @@ Result __fastcall evaluate(VkCommandBuffer command,void* handle,void* nativePara
     // NGX parameter methods are not thread-safe. Serialize only this pair of
     // feature evaluations, not game draws or command recording in general.
     std::lock_guard<std::mutex> lock(mutex);auto found=pairs.find(handle);
-    if(found==pairs.end()||!input){fallback("missing stereo history");return evaluateOriginal(command,handle,nativeParams,input);}
+    if(found==pairs.end()||!input){if(found!=pairs.end())found->second.seen=false;fallback("missing stereo history");return evaluateOriginal(command,handle,nativeParams,input);}
     auto& pair=found->second;std::array<EyeParameters,2> eyes;sfs::FramePose pose;
-    const bool valid=prepareEyes(*input,eyes,[&](const auto& resources,auto& out){return sfs::dlssEyeResources(command,resources,out,pose);},false);
-    if(!valid){fallback("unsupported eye resource contract");return evaluateOriginal(command,handle,nativeParams,input);}
+    bool valid{};
+    try{valid=prepareEyes(*input,eyes,[&](const auto& resources,auto& out){return sfs::dlssEyeResources(command,resources,out,pose);},false);}catch(...){}
+    if(!valid){pair.seen=false;fallback("unsupported eye resource contract");return evaluateOriginal(command,handle,nativeParams,input);}
     const auto tick=GetTickCount64();
     const bool reset=!pair.seen||pair.quad!=pose.quadView||pair.stereoQuad!=pose.stereoQuad||pose.recenterRequested||tick-pair.tick>250||pose.serial<pair.serial||pose.serial>pair.serial+1;
     if(reset)for(auto& eye:eyes)eye.params.set<int>(0x38,1);
+    pair.seen=false;
     const auto left=evaluateOriginal(command,handle,nativeParams,&eyes[0].params);
     const auto right=left==success?evaluateOriginal(command,pair.right,nativeParams,&eyes[1].params):left;
     if(left!=success||right!=success){fallback("native evaluation failed");return left!=success?left:right;}
     pair.seen=true;pair.serial=pose.serial;pair.quad=pose.quadView;pair.stereoQuad=pose.stereoQuad;pair.tick=tick;
-    if(!timing){if(++pair.samples==1)log("DLSS_STEREO evaluated eyes=2 timing=off");return success;}
+    if(!timing){if(++pair.samples==1)try{log("DLSS_STEREO evaluated eyes=2 timing=off");}catch(...){}return success;}
     const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());
     pair.cpuNs+=ns;pair.maxNs=std::max(pair.maxNs,ns);++pair.samples;++pair.windowSamples;
     if(pair.samples==1||pair.samples%240==0){
-        log("DLSS_STEREO evaluated eyes=2 serial="+std::to_string(pose.serial)+" reset="+std::to_string(reset)+
-            " input="+std::to_string(input->get<uint32_t>(0x30))+"x"+std::to_string(input->get<uint32_t>(0x34))+
-            " cpuMeanMs="+std::to_string(double(pair.cpuNs)/pair.windowSamples/1e6)+" cpuMaxMs="+std::to_string(double(pair.maxNs)/1e6));
+        const auto cpuNs=pair.cpuNs,maxNs=pair.maxNs,windowSamples=pair.windowSamples;
         pair.cpuNs=pair.maxNs=pair.windowSamples=0;
+        try{log("DLSS_STEREO evaluated eyes=2 serial="+std::to_string(pose.serial)+" reset="+std::to_string(reset)+
+            " input="+std::to_string(input->get<uint32_t>(0x30))+"x"+std::to_string(input->get<uint32_t>(0x34))+
+            " cpuMeanMs="+std::to_string(double(cpuNs)/windowSamples/1e6)+" cpuMaxMs="+std::to_string(double(maxNs)/1e6));}catch(...){}
     }
     return success;
 }
 }
 bool install() noexcept {try{
+    std::lock_guard<std::mutex> lock(installationMutex);
     if(installed)return true;
     if(!camera::stats().installed||!sfs::vrEnabled())return false;
     char enabled[8]{};if(GetEnvironmentVariableA("ARGENT_DLSS_STEREO",enabled,8)==1&&enabled[0]=='0')return false;
     const auto base=reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const auto createRva=build::rva(0x2268b30),evaluateRva=build::rva(0x1cc7aa0),releaseRva=build::rva(0x2268f40);
+    if(!base||!createRva||!evaluateRva||!releaseRva){fallback("entry addresses unavailable");return false;}
     const uint8_t common[]={0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x6c,0x24,0x10,0x48,0x89,0x74,0x24,0x18};
     const uint8_t releaseBytes[]={0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x1d,0x2f,0x91,0xa5,0x04};
     const uint8_t storeReleaseBytes[]={0x48,0x89,0x5c,0x24,0x08,0x57,0x48,0x83,0xec,0x20,0x48,0x8b,0x1d,0x6f,0x3f,0xa7,0x04};
-    void* targets[]={reinterpret_cast<void*>(base+build::rva(0x2268b30)),reinterpret_cast<void*>(base+build::rva(0x1cc7aa0)),reinterpret_cast<void*>(base+build::rva(0x2268f40))};
+    const std::array<void*,3> targets{reinterpret_cast<void*>(base+createRva),reinterpret_cast<void*>(base+evaluateRva),reinterpret_cast<void*>(base+releaseRva)};
     if(std::memcmp(targets[0],common,sizeof(common))||std::memcmp(targets[1],common,sizeof(common))||std::memcmp(targets[2],build::microsoftStore?storeReleaseBytes:releaseBytes,sizeof(releaseBytes))){fallback("entry signature mismatch");return false;}
-    void* hooks[]={reinterpret_cast<void*>(&create),reinterpret_cast<void*>(&evaluate),reinterpret_cast<void*>(&release)};
-    void** originals[]={reinterpret_cast<void**>(&createOriginal),reinterpret_cast<void**>(&evaluateOriginal),reinterpret_cast<void**>(&releaseOriginal)};
-    size_t created=0;
-    for(;created<3;++created)if(MH_CreateHook(targets[created],hooks[created],originals[created])!=MH_OK)break;
-    if(created!=3){while(created)MH_RemoveHook(targets[--created]);fallback("hook creation failed");return false;}
-    for(auto target:targets)MH_QueueEnableHook(target);
-    if(MH_ApplyQueued()!=MH_OK){for(auto target:targets){MH_DisableHook(target);MH_RemoveHook(target);}fallback("hook activation failed");return false;}
-    installed=true;log(std::string("DLSS_STEREO installed: dual histories, cached single-layer views, no image copies; build=")+(build::microsoftStore?"microsoft-store":"steam"));return true;
+    const std::array<void*,3> hooks{reinterpret_cast<void*>(&create),reinterpret_cast<void*>(&evaluate),reinterpret_cast<void*>(&release)};
+    const std::array<void**,3> originals{reinterpret_cast<void**>(&createOriginal),reinterpret_cast<void**>(&evaluateOriginal),reinterpret_cast<void**>(&releaseOriginal)};
+    const std::array<void*,3> previous{*originals[0],*originals[1],*originals[2]};
+    const char* failure{};
+    {
+        DlssHookAttempt attempt{targets,originals,previous};
+        for(size_t i=0;i<targets.size();++i){
+            if(MH_CreateHook(targets[i],hooks[i],originals[i])!=MH_OK){failure="hook creation failed";break;}
+            ++attempt.created;
+        }
+        if(!failure)for(const auto target:targets)if(MH_EnableHook(target)!=MH_OK){failure="hook activation failed";break;}
+        if(!failure)attempt.committed=true;
+    }
+    if(failure){fallback(failure);return false;}
+    installed=true;
+    try{log(std::string("DLSS_STEREO installed: dual histories, cached single-layer views, no image copies; build=")+(build::microsoftStore?"microsoft-store":"steam"));}catch(...){}
+    return true;
 }catch(...){fallback("installation exception");return false;}}
 }
