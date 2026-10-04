@@ -10,6 +10,7 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `936dc41` | Controller configuration and support reload | Stability | Require complete native reads, replace support snapshots and isolate diagnostic failures after complete state publication. |
 | `80c79ef` | Hand calibration save completion | Stability | Check final stream state after close before replacing the file or publishing the draft. |
 | `bd22fd1` | Launcher INI persistence verification | Stability | Verify native zero-return flush semantics, disk contents and snapshot replacement; no runtime change. |
+| `61b8021` | Launcher controls snapshot persistence | Stability | Read a complete native snapshot before formatting/replacement; reject failed streams and preserve normal CRLF output. |
 
 ## Configuration Publication
 
@@ -121,15 +122,58 @@ successful saves, so the production launcher is deliberately unchanged.
 Source: [Microsoft API return-value contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-writeprivateprofilestringw).
 `launcher_profile_flush` passes in 0.08 seconds. It exercises Windows APIs with
 isolated files, not the complete GUI save path or real disk/cache faults.
-The old controls-file read, unknown-key preservation after failed input, and
-broader launcher save/apply boundaries remain to inspect.
+The complete GUI save/apply boundaries remain to inspect.
+
+## Launcher Controls Snapshot Persistence
+
+`writeControlsConfig` previously formatted an unchecked `ifstream`. The formatter
+also returned a replacement from failed initial streams or a successfully parsed
+prefix followed by a read error. Unknown settings and calibration rows after that
+prefix could be dropped if replacement succeeded. The native read-denied lock in
+the fixture reproduced an attempted replacement without a successful read, not
+actual data loss: Windows refused replacement under that particular lock.
+
+The writer now reuses `readConfigurationFile` before formatting. Missing files
+remain valid first-run input; other native errors abort before a temporary writer
+or replacement is attempted. Active writers are refused. The formatter requires
+a good initial stream, normal complete EOF and successful output, so failed input
+cannot return a partial snapshot. Terminal CR from native CRLF bytes is normalized
+before the existing text-mode writer, avoiding doubled CR while retaining comment,
+unknown-setting and calibration row contents. Duplicate launcher-owned rows still
+collapse to one updated row. Closing and checking output precedes replacement.
+
+The unchanged writer/formatter fails seven of seventeen fixture checks. These
+include the new native-reader fault requirement; that hook is not connected to
+the original CRT-based `ifstream`, so it is not a reproduced original native disk
+fault. Four direct formatter checks separately reproduce interrupted input and
+initial bad/fail/EOF state acceptance. All seventeen final checks pass using the
+production `LauncherControlsSave.inc`, real temporary files and Windows locks.
+They cover normal CRLF rewrite, comments/unknown rows, missing/empty files, failed
+reads, an active native writer, denied replacement, temporary-open failure,
+upstream settings rejection, native read failure after 4096 bytes, and retry.
+Rejected reads preserve the destination and attempt no replacement.
+
+The launcher is mechanically split to respect the file-size limit: 531 lines in
+the main file, 429 in startup, 371 in window handling and 338 in the main entry
+include. Window/main content and startup with the original writer expanded match
+their original source after newline normalization. The extracted production writer
+is thirteen lines. Existing `player_mechanics` and `presentation_policy` formatter
+callers pass, alongside native INI and probe checks: five checks in 1.00 second.
+
+The fixture substitutes the upstream INI save and controls UI values; it does not
+prove the complete GUI, autosave/apply acknowledgement or legacy settings load.
+INI persistence still precedes the controls save, so the two files are not a single
+transaction. Concurrent launcher processes, replacement between the read and
+write, actual disk faults and host-allocation faults remain unverified. This is a
+save-request stability fix, not an average-FPS optimization.
 
 ## Verification Limits
 
 All eleven configuration boundaries, six support persistence, twenty reload and
-eight hand-save cases pass. The final hand/calibration six-check run passes in
-19.92 seconds; all 125 harness checks pass in 106.44 seconds after a full
-incremental rebuild, including the native launcher flush contract check.
+eight hand-save and seventeen launcher controls-save/formatter cases pass.
+The final launcher five-check run passes in 1.00 second; all 127 harness checks
+pass in 106.52 seconds after a full incremental rebuild, including native launcher
+flush verification and the existing presentation-policy formatter caller.
 Full raw diffs and relevant unfiltered diagnostics were inspected. Existing build
 warnings concern debug/assertion definitions and macro redefinitions.
 
@@ -143,7 +187,7 @@ real temporary files, with controlled native read faults and optional logging.
 It does not include the complete controller action update or execute a native
 OpenXR session. Remaining action polling and other diagnostic boundaries still
 need verification.
-Hand/model calibration load validation, full hand polling, launcher controls-file
-reads and broader save/apply completion remain pending. Native game/headset,
+Hand/model calibration load validation, full hand polling, launcher legacy-load
+and broader save/apply completion remain pending. Native game/headset,
 package and combined gameplay FPS validation remain unverified; no audit
 completion or FPS improvement is claimed for these persistence changes.
