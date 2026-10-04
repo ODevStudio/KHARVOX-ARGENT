@@ -12,6 +12,7 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `bd22fd1` | Launcher INI persistence verification | Stability | Verify native zero-return flush semantics, disk contents and snapshot replacement; no runtime change. |
 | `61b8021` | Launcher controls snapshot persistence | Stability | Read a complete native snapshot before formatting/replacement; reject failed streams and preserve normal CRLF output. |
 | `4b99ee3` | Hand-pose calibration loading | Stability | Accept commented authored defaults and publish only complete, validated row overlays; preserve the prior map and preview on failure. |
+| `6418ac7` | Weapon-pose calibration loading | Stability | Reuse the complete native reader and transactional row parser; preserve shipped/saved precedence, existing pose limits and one-time loading. |
 
 ## Configuration Publication
 
@@ -189,16 +190,45 @@ preservation and shared decoder/row failure containment. The native read-fault
 hook exercises the fixed reader, not the original CRT `ifstream`; it is not a
 reproduced original injected disk fault. Seven focused hand/GPU/calibration
 checks pass in 19.99 seconds before the final row-error guard. After that guard,
-affected targets rebuild and the 22-case check passes in 0.07 seconds. Full-suite
-verification after this commit remains pending. This adds no per-frame I/O or
-claimed average-FPS gain. Weapon, model and legacy load boundaries remain open.
+affected targets rebuild and the 22-case check passes in 0.07 seconds. The later
+full 129-check suite also passes. This adds no per-frame I/O or claimed
+average-FPS gain. Model and legacy load boundaries remain open.
+
+## Weapon-Pose Calibration Loading
+
+The weapon loader changed the committed map row by row and skipped malformed or
+invalid rows, so a valid prefix could override shipped settings even though the
+saved file was incomplete. Unexpected trailing tokens and numeric suffixes were
+also accepted. Reusing the shared reader rejects an entire invalid file while
+preserving the preceding committed overlay. Valid saved profiles still override
+defaults without discarding unrelated keys. Existing finite-position/rotation,
+`.8661` position-length and 180-degree rotation limits remain unchanged.
+
+The unchanged production-class fixture fails twelve of 25 cases. One is a
+native-read fault requirement whose hook does not intercept the original CRT
+reader, not a reproduced original injected disk fault. All 25 fixed cases pass:
+checked-in profiles, handed defaults, comments/CRLF, malformed prefixes/suffixes,
+trailing tokens, invalid values, unknown complete profiles, final unterminated
+rows, duplicate keys, accepted limit values, empty/comment-only/missing saved
+files, an active native writer, a controlled read error after a valid prefix,
+fresh-editor retry, invalid-default retention and pending-preview preservation.
+Calling `load` again neither reads files nor changes the original root; the
+existing guard remains in place, with no per-frame retry or I/O added.
+
+Including the shared native reader earlier initially bypassed the existing
+reload fixture's macro-based read-fault hook. Moving the production weapon
+include after fixture initialization repairs the fixture, not runtime behavior.
+All twenty reload and eleven configuration boundaries again pass with their
+fault hooks active; existing support persistence, apply/save and player-mechanics
+checks pass. The full incremental build and all 129 harness checks pass in
+106.90 seconds. No average-FPS gain is claimed.
 
 ## Verification Limits
 
-All eleven configuration boundaries, six support persistence, twenty reload and
-eight hand-save and seventeen launcher controls-save/formatter cases pass.
-The final launcher five-check run passes in 1.00 second; all 127 harness checks
-pass in 106.52 seconds after a full incremental rebuild, including native launcher
+All eleven configuration boundaries, six support persistence, twenty reload,
+eight hand-save, seventeen launcher controls-save/formatter, 22 hand-pose and
+25 weapon-pose load/resolution cases pass. All 129 harness checks pass in
+106.90 seconds after a full incremental rebuild, including native launcher
 flush verification and the existing presentation-policy formatter caller.
 Full raw diffs and relevant unfiltered diagnostics were inspected. Existing build
 warnings concern debug/assertion definitions and macro redefinitions.
@@ -213,7 +243,7 @@ real temporary files, with controlled native read faults and optional logging.
 It does not include the complete controller action update or execute a native
 OpenXR session. Remaining action polling and other diagnostic boundaries still
 need verification.
-Weapon/model/legacy calibration load validation, full hand polling, launcher legacy-load
+Model/legacy calibration load validation, full hand polling, launcher legacy-load
 and broader save/apply completion remain pending. Native game/headset,
 package and combined gameplay FPS validation remain unverified; no audit
 completion or FPS improvement is claimed for these persistence changes.
