@@ -38,6 +38,7 @@ struct Source {
     bool transferable{};
     std::vector<VkImage> images;
     bool displaySrgb{}; // WSI SRGB_NONLINEAR bytes, including UNORM attachments.
+    bool sampled{};
 };
 // Returns whether the application's binary present wait semaphores were consumed.
 bool presentQuad(Device& device,VkQueue queue,uint32_t family,uint32_t index,
@@ -47,10 +48,11 @@ void prepareSteamFrame(Device& device,VkSwapchainKHR swapchain);
 bool beginStereoFrame(Device& device,const Source& source,sfs::FramePose& pose,XrPosef& head,bool quadView=false,
                       const sfs::Matrix* cinematicProjection=nullptr,sfs::EyeUniforms* cinematicUniforms=nullptr);
 // Sources are graphics-queue-owned; waits signal completion of both eye layers.
-// Returns whether the binary waits were consumed, including on submission error.
 using StereoMirror = std::function<void(VkImage,VkExtent2D,VkImageLayout)>;
-bool presentStereoFrame(Device& device,const sfs::StereoFrame& frame,
+struct StereoPresentResult {bool waitsConsumed{},sourceComplete{};};
+StereoPresentResult presentStereoFrame(Device& device,const sfs::StereoFrame& frame,
                         uint32_t waitCount,const VkSemaphore* waits,const StereoMirror& mirror = {});
 void cancelStereoFrame();
+void retireStereoSources(VkDevice device);
 void shutdownXR(VkDevice device);
 }
