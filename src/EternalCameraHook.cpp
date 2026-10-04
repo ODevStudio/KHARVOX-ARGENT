@@ -9,6 +9,7 @@
 #include "HeadsetFov.h"
 #include "AnimationFovGuard.h"
 #include <unordered_map>
+#include <optional>
 #include "hud/EternalWeaponWheel.h"
 #include "hud/HudPlaceholder.h"
 #include "hud/EternalHitMarkers.h"
@@ -28,10 +29,13 @@
 #include <cstring>
 #include <cstdlib>
 #include <intrin.h>
+#include <climits>
+#include <exception>
 namespace argent::camera { namespace {
 using Setter=void(__fastcall*)(void*,const float*,const float*);
 Setter original{};void* target{};
 std::mutex poseMutex;
+std::mutex installationMutex;
 XrQuaternionf current{0,0,0,1},reference{0,0,0,1};
 XrVector3f currentPosition{},referencePosition{};
 bool translate{},needPositionReference{true};
@@ -67,7 +71,7 @@ void synchronizeControlledActor(){
  physicsOwner=anchorOwner=0;physicsTick=0;follow={};yawFollow={};placedWorldHands={};
  history={};historyCursor=0;matchedSerial=0;matchedHands={};hudHandValid=false;hudTick=0;
  input::weaponApplied({});input::followStick({});input::headMovement(0);input::followTurn(0);
- log(std::string("ETERNAL_CONTROLLED_ACTOR mode=")+(next?"campaign-revenant":"slayer")+" camera=rebase");
+ try{log(std::string("ETERNAL_CONTROLLED_ACTOR mode=")+(next?"campaign-revenant":"slayer")+" camera=rebase");}catch(...){}
 }
 void applyCrouchHeight(std::array<float,3>& origin){
  // Eternal's pm_crouchviewheight default is 0.8763 metres. Keep controller and
@@ -82,14 +86,14 @@ Discover discover{};
 std::atomic<ULONGLONG> lastDiscovery{};
 void maintainRenderControls();
 int __fastcall pollController(void* object,int user){
- if(user==0)maintainRenderControls();
+ if(user==0)try{maintainRenderControls();}catch(...){}
  // Eternal's discovery thread only tries disconnected slots after its own
  // rescan flag is raised. VR becomes ready after that initial scan.
- if(user==0&&discover){
+ if(user==0&&discover)try{
   bool ready;{std::lock_guard<std::mutex> lock(input::stateMutex);ready=input::fresh(input::state,GetTickCount64());}
   auto last=lastDiscovery.load();const auto now=GetTickCount64();
   if(ready&&now-last>1000&&lastDiscovery.compare_exchange_strong(last,now))discover(object);
- }
+ }catch(...){}
  return originalPoll(object,user);
 }
 using CvarSetter=bool(__fastcall*)(void*,const char*,bool);
@@ -108,11 +112,12 @@ FinalizeCamera originalFinalizeCamera{};
 void __fastcall finalizeCamera(void* object){
  // Only touch a camera while the engine owns it in this callback. Never retain
  // a pointer for asynchronous restoration. Each camera has independent state.
- thread_local std::unordered_map<void*,AnimationFovGuard> guards;
+ thread_local std::optional<std::unordered_map<void*,AnimationFovGuard>> guards;
  auto* fov=reinterpret_cast<float*>(static_cast<unsigned char*>(object)+0xb8);
- auto previous=guards.find(object);
- if(previous!=guards.end()){previous->second.restore(fov[0],fov[1]);guards.erase(previous);}
+ if(guards){auto previous=guards->find(object);
+  if(previous!=guards->end()){previous->second.restore(fov[0],fov[1]);guards->erase(previous);}}
  originalFinalizeCamera(object);
+ try{
  bool protect;{
   std::lock_guard<std::mutex> lock(poseMutex);
   const auto now=GetTickCount64();
@@ -120,16 +125,21 @@ void __fastcall finalizeCamera(void* object){
  }
  if(!protect)return;
  float x,y;{std::lock_guard<std::mutex> lock(fovMutex);x=requiredFovX;y=requiredFovY;}
- AnimationFovGuard guard;
- if(guard.apply(fov[0],fov[1],x,y)){
-  guards.emplace(object,guard);
+ AnimationFovGuard guard;float protectedX=fov[0],protectedY=fov[1];
+ if(guard.apply(protectedX,protectedY,x,y)){
+  if(!guards)guards.emplace();
+  if(!guards->emplace(object,guard).second)return;
+  fov[0]=protectedX;fov[1]=protectedY;
   static std::atomic<uint64_t> count{};
   if(count.fetch_add(1)%600==0)log("ETERNAL_ANIMATION_FOV native="+std::to_string(guard.nativeX)+","+std::to_string(guard.nativeY)+" protected="+std::to_string(fov[0])+","+std::to_string(fov[1]));
  }
+ }catch(...){}
 }
 std::filesystem::path lightCullingTestMarker;
 void maintainRenderControls(){
- if(!setCvar)return;
+ thread_local bool busy{};
+ if(!setCvar||busy)return;
+ struct BusyReset {bool& value;~BusyReset(){value=false;}} reset{busy};busy=true;
  std::unique_lock<std::mutex> controlLock(controlMutex,std::try_to_lock);
  if(!controlLock.owns_lock())return;
  bool world;{std::lock_guard<std::mutex> lock(poseMutex);world=active;}
@@ -155,13 +165,12 @@ void maintainRenderControls(){
  const bool transition=world!=lightCulling.held;
  // Execute on an engine camera/input callback. Use its setter (allocation, locking,
  // numeric conversion and change notifications), never raw CVar value writes.
- thread_local bool busy=false;if(busy)return;busy=true;
 
  const bool bloomTransition=wheelShown!=wheelBloom.held;
  const bool bloomOk=wheelBloom.update(wheelShown,[&](int& value){return readRenderControl(cvarBase,wheelBloomControl,read,value);},[&](int value){
   const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(wheelBloomControl.rva)),text.c_str(),true);
  });
- if(bloomTransition||!bloomOk)log("ETERNAL_WHEEL_BLOOM visible="+std::to_string(wheelShown)+" success="+std::to_string(bloomOk)+" restore="+std::to_string(wheelBloom.restore));
+ if(bloomTransition||!bloomOk)try{log("ETERNAL_WHEEL_BLOOM visible="+std::to_string(wheelShown)+" success="+std::to_string(bloomOk)+" restore="+std::to_string(wheelBloom.restore));}catch(...){}
  // FSR owns AA while selected; otherwise preserve engine-selected DLSS.
  static const bool fsrActive=environmentFlag("ARGENT_FSR1");
  const RenderControl aaMode{0x6685ce0,"r_antialiasing","",0};
@@ -170,14 +179,14 @@ void maintainRenderControls(){
  if(aaReady&&desiredAa>=0){
   int before{},after{};bool accepted{};
   if(aaPolicy.apply(aaNow,desiredAa,[&](int& value){return readRenderControl(cvarBase,aaMode,read,value);},[&](int value){const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(aaMode.rva)),text.c_str(),true);},before,after,accepted))
-   log("ETERNAL_AA_ENFORCED before="+std::to_string(before)+" requested="+std::to_string(desiredAa)+" accepted="+std::to_string(accepted)+" after="+std::to_string(after)+" verified="+std::to_string(after==desiredAa)+" context="+presentation::name(aaContext));
+   try{log("ETERNAL_AA_ENFORCED before="+std::to_string(before)+" requested="+std::to_string(desiredAa)+" accepted="+std::to_string(accepted)+" after="+std::to_string(after)+" verified="+std::to_string(after==desiredAa)+" context="+presentation::name(aaContext));}catch(...){}
  }
 #ifndef ARGENT_CLEAN_RELEASE
  static FovComparison fovTest;static int lastFovPhase=-2;static uint64_t fovReport{};
  if(perf::enabled()&&!lightCullingTestMarker.empty()){
   auto request=lightCullingTestMarker.parent_path()/L"fov-compare.request";std::ifstream command(request);int value=-1;
   if(command>>value){command.close();std::error_code error;std::filesystem::remove(request,error);
-   if(!error&&(value==0||value==1)){fovTest.request(value==1);log("PERF_FOV_REQUEST start="+std::to_string(value));}
+   if(!error&&(value==0||value==1)){fovTest.request(value==1);try{log("PERF_FOV_REQUEST start="+std::to_string(value));}catch(...){}}
   }
  }
 #endif
@@ -187,7 +196,7 @@ void maintainRenderControls(){
    if(!calibratedFov){calibratedFov=actual;calibratedFovX=observedFovX;calibratedFovY=observedFovY;}
    const int next=engineFov(requiredFovX,requiredFovY,calibratedFovX,calibratedFovY,calibratedFov);
    if(next&&std::abs(next-automaticFov)>=2){automaticFov=next;fovChanged=aaNow;
-    log("HEADSET_FOV engine="+std::to_string(next)+" requiredTanX="+std::to_string(requiredFovX)+" requiredTanY="+std::to_string(requiredFovY)+" observedTanX="+std::to_string(observedFovX)+" observedTanY="+std::to_string(observedFovY));}
+    try{log("HEADSET_FOV engine="+std::to_string(next)+" requiredTanX="+std::to_string(requiredFovX)+" requiredTanY="+std::to_string(requiredFovY)+" observedTanX="+std::to_string(observedFovX)+" observedTanY="+std::to_string(observedFovY));}catch(...){}}
   }
 #ifdef ARGENT_CLEAN_RELEASE
   selectedFov=automaticFov;
@@ -197,7 +206,7 @@ void maintainRenderControls(){
 #endif
  }
  enforceRenderControls(cvarBase,read,setCvar,[](const RenderControl& c,bool accepted,int before,bool verified,int after){
-  log("ETERNAL_CONTROL name="+std::string(c.name)+" requested="+c.value+" before="+std::to_string(before)+" accepted="+std::to_string(accepted)+" verified="+std::to_string(verified)+" after="+std::to_string(after));
+  try{log("ETERNAL_CONTROL name="+std::string(c.name)+" requested="+c.value+" before="+std::to_string(before)+" accepted="+std::to_string(accepted)+" verified="+std::to_string(verified)+" after="+std::to_string(after));}catch(...){}
  },selectedFov);
 #ifndef ARGENT_CLEAN_RELEASE
  int actualFov{};const bool fovKnown=readRenderControl(cvarBase,renderControls[0],read,actualFov);
@@ -205,7 +214,7 @@ void maintainRenderControls(){
  if(perf::enabled()&&(lastFovPhase!=fovTest.phase||aaNow-fovReport>=1000)){
   int actual{};const bool known=readRenderControl(cvarBase,renderControls[0],read,actual);
   std::lock_guard<std::mutex> lock(fovMutex);
-  log("PERF_FOV_STATE serial="+std::to_string(perf::frame.load())+" phase="+std::to_string(fovTest.phase)+" pending="+std::to_string(fovTest.pending)+" automatic="+std::to_string(automaticFov)+" requested="+std::to_string(selectedFov)+" actual="+(known?std::to_string(actual):"unknown")+" verified="+std::to_string(known&&actual==selectedFov)+" tanX="+std::to_string(observedFovX)+" tanY="+std::to_string(observedFovY)+" ageMs="+std::to_string(aaNow>=observedFovTick?aaNow-observedFovTick:0)+" context="+presentation::name(aaContext));
+  try{log("PERF_FOV_STATE serial="+std::to_string(perf::frame.load())+" phase="+std::to_string(fovTest.phase)+" pending="+std::to_string(fovTest.pending)+" automatic="+std::to_string(automaticFov)+" requested="+std::to_string(selectedFov)+" actual="+(known?std::to_string(actual):"unknown")+" verified="+std::to_string(known&&actual==selectedFov)+" tanX="+std::to_string(observedFovX)+" tanY="+std::to_string(observedFovY)+" ageMs="+std::to_string(aaNow>=observedFovTick?aaNow-observedFovTick:0)+" context="+presentation::name(aaContext));}catch(...){}
   lastFovPhase=fovTest.phase;fovReport=aaNow;
  }
 #endif
@@ -220,26 +229,25 @@ void maintainRenderControls(){
   int safe{},blur{};
   const bool safeKnown=readRenderControl(cvarBase,RenderControl{0x66de720,"r_TAASafeMode","",0},read,safe);
   const bool blurKnown=readRenderControl(cvarBase,RenderControl{0x66deb80,"r_motionblur","",0},read,blur);
-  log("ETERNAL_TEMPORAL_STATE aa="+std::to_string(aa)+" taaSafeMode="+(safeKnown?std::to_string(safe):"unknown")+
-      " motionBlur="+(blurKnown?std::to_string(blur):"unknown")+" requestedAa="+std::to_string(desiredAa)+" verified="+std::to_string(desiredAa<0||aa==desiredAa)+" nativeTaaBlocked=1 dlssSelected="+std::to_string(aa==2)+" readOnly=1");
+  try{log("ETERNAL_TEMPORAL_STATE aa="+std::to_string(aa)+" taaSafeMode="+(safeKnown?std::to_string(safe):"unknown")+
+      " motionBlur="+(blurKnown?std::to_string(blur):"unknown")+" requestedAa="+std::to_string(desiredAa)+" verified="+std::to_string(desiredAa<0||aa==desiredAa)+" nativeTaaBlocked=1 dlssSelected="+std::to_string(aa==2)+" readOnly=1");}catch(...){}
   lastLoggedAa=aa;lastAaReport=aaNow;
  }
  static int scaleOwner=-1;
- if(scaleOwner!=int(dlssOwnsScale)){log(std::string("ETERNAL_SCALE owner=")+(dlssOwnsScale?"DLSS":"launcher"));scaleOwner=int(dlssOwnsScale);}
+ if(scaleOwner!=int(dlssOwnsScale)){try{log(std::string("ETERNAL_SCALE owner=")+(dlssOwnsScale?"DLSS":"launcher"));}catch(...){}scaleOwner=int(dlssOwnsScale);}
  static bool scaleReported=false;
  if(!dlssOwnsScale)for(const auto& c:scales){int value{};float fraction{};const bool known=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);
   const bool same=known&&(c.floating?std::abs(fraction-renderScale)<.0001f:value==c.integer);
   if(known&&!same)setCvar(reinterpret_cast<void*>(cvarBase+build::rva(c.rva)),c.value,true);
-  if(!scaleReported||!same){const bool verified=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);log("ETERNAL_SCALE name="+std::string(c.name)+" requested="+c.value+" read="+std::to_string(verified)+" value="+std::to_string(c.floating?fraction:float(value)));}
+  if(!scaleReported||!same){const bool verified=readRenderControl(cvarBase,c,read,value,c.floating?&fraction:nullptr);try{log("ETERNAL_SCALE name="+std::string(c.name)+" requested="+c.value+" read="+std::to_string(verified)+" value="+std::to_string(c.floating?fraction:float(value)));}catch(...){}}
  }
  scaleReported=true;
  const bool ok=lightCulling.update(world,[&](int& value){return readRenderControl(cvarBase,lightCullingControl,read,value);},[&](int value){
   const auto text=std::to_string(value);return setCvar(reinterpret_cast<void*>(cvarBase+build::rva(lightCullingControl.rva)),text.c_str(),false);
  });
  if(transition||!ok){int value{};const bool verified=readRenderControl(cvarBase,lightCullingControl,read,value);
-  log("ETERNAL_LIGHT_CULL world="+std::to_string(world)+" success="+std::to_string(ok)+" verified="+std::to_string(verified)+" value="+std::to_string(value)+" restore="+std::to_string(lightCulling.restore));
+  try{log("ETERNAL_LIGHT_CULL world="+std::to_string(world)+" success="+std::to_string(ok)+" verified="+std::to_string(verified)+" value="+std::to_string(value)+" restore="+std::to_string(lightCulling.restore));}catch(...){}
  }
- busy=false;
 }
 constexpr unsigned char signature[]={0xf2,0x0f,0x10,0x02,0xf2,0x0f,0x11,0x81,0x24,0x01,0x00,0x00,0x8b,0x42,0x08,0x89,0x81,0x2c,0x01,0x00,0x00,0x41,0x0f,0x10,0x00,0x0f,0x11,0x81,0x30,0x01,0x00,0x00,0x41,0x0f,0x10,0x48,0x10,0x0f,0x11,0x89,0x40,0x01,0x00,0x00,0x41,0x8b,0x40,0x20,0x89,0x81,0x50,0x01,0x00,0x00,0xc3};
 bool probeStoreImage(){
@@ -259,9 +267,9 @@ bool probeStoreImage(){
 bool approvedStoreImage(){static const bool approved=[](){
  if(!probeStoreImage())return false;
  const auto image=reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
- if(const auto failed=build::validateStoreCode(image)){log("ETERNAL_BUILD refused: Store contract RVA="+std::to_string(failed));return false;}
+ if(const auto failed=build::validateStoreCode(image)){try{log("ETERNAL_BUILD refused: Store contract RVA="+std::to_string(failed));}catch(...){}return false;}
  build::microsoftStore=true;
- log("ETERNAL_BUILD profile=microsoft-store-20260319 native-contracts="+std::to_string(build::storeCodeCount)+" verified=1");return true;
+ try{log("ETERNAL_BUILD profile=microsoft-store-20260319 native-contracts="+std::to_string(build::storeCodeCount)+" verified=1");}catch(...){}return true;
  }();return approved;}
 bool approvedImage(){
  if(approvedStoreImage())return true;
@@ -277,7 +285,7 @@ bool approvedImage(){
  return ok&&!std::memcmp(digest,expected,32);
 }
 void __fastcall cameraSetter(void* object,const float* position,const float* basis){
- maintainRenderControls();
+ try{maintainRenderControls();}catch(...){}
  const bool authored=presentation::refreshAnimationCamera();
  // Monkey bars retain native physics/launch velocity, but do not borrow the
  // authored first-person camera joint. Keep the normal upright VR view.
@@ -299,7 +307,7 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
       animationReference=yawFollow.reference(reference);animationActive=true;
       anchorOwner=0;follow.previousValid=false;follow.commanded=false;yawFollow.command=0;
       input::followStick({});input::followTurn(0);
-      log("ETERNAL_KILL_CAMERA active=1 position=native-animation rotation=held-body-plus-head translation=off");
+      try{log("ETERNAL_KILL_CAMERA active=1 position=native-animation rotation=held-body-plus-head translation=off");}catch(...){}
      }
      // KHARVOX animation-camera contract: native authored position, a level
      // gameplay basis held at entry, free HMD look, no physical translation.
@@ -309,7 +317,7 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
     if(animationActive){
      animationActive=false;anchorOwner=0;needPositionReference=true;follow={};
      yawFollow.previousValid=false;yawFollow.command=0;
-     log("ETERNAL_KILL_CAMERA active=0 anchor=rebase");
+     try{log("ETERNAL_KILL_CAMERA active=0 anchor=rebase");}catch(...){}
     }
     if(horizontal>.05f&&(!viewActor||!bodyValid)){
      // Native Revenant yaw already includes our absolute HMD direction. Keep
@@ -368,84 +376,21 @@ void __fastcall cameraSetter(void* object,const float* position,const float* bas
  if(use)++applied;
  original(object,usePosition?moved.data():position,use?transformed.data():basis);
 }
+void failCameraHookRollback() noexcept {RaiseFailFastException(nullptr,nullptr,0);std::terminate();}
+void removeOwnedCameraHook(void* hook) noexcept {if(MH_RemoveHook(hook)!=MH_OK)failCameraHookRollback();}
 bool activate(){
  HMODULE pinned{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&cameraSetter),&pinned))return false;
  auto init=MH_Initialize();if(init!=MH_OK&&init!=MH_ERROR_ALREADY_INITIALIZED)return false;
  auto created=MH_CreateHook(target,reinterpret_cast<void*>(&cameraSetter),reinterpret_cast<void**>(&original));
- if(created!=MH_OK){log("ETERNAL_HOOK create failed="+std::to_string(created));return false;}
- auto enabled=MH_EnableHook(target);if(enabled!=MH_OK){MH_RemoveHook(target);log("ETERNAL_HOOK enable failed="+std::to_string(enabled));return false;}
+ if(created!=MH_OK){try{log("ETERNAL_HOOK create failed="+std::to_string(created));}catch(...){}return false;}
+ auto enabled=MH_EnableHook(target);if(enabled!=MH_OK){removeOwnedCameraHook(target);try{log("ETERNAL_HOOK enable failed="+std::to_string(enabled));}catch(...){}return false;}
  installed=true;return true;
 }
 }
-namespace {
-uint32_t eyeWidth{},eyeHeight{};
-using ClientRect=BOOL(WINAPI*)(HWND,LPRECT);
-ClientRect nativeClientRect{};uintptr_t renderImageBase{};
-using RefreshExtent=void(__fastcall*)();RefreshExtent nativeRefreshExtent{};
-void __fastcall refreshRenderExtent(){
- // These are the engine's output dimensions, not the window CVars. Its own
- // refresh then derives scene/DLSS dimensions and preserves its AA policy.
- auto output=reinterpret_cast<uint32_t*>(renderImageBase+build::rva(0x39aabe4));
- output[0]=eyeWidth;output[1]=eyeHeight;
- nativeRefreshExtent();
-}
-BOOL WINAPI renderClientRect(HWND window,LPRECT rect){
- const auto caller=build::semanticRva(reinterpret_cast<uintptr_t>(_ReturnAddress())-renderImageBase);
- auto ok=nativeClientRect(window,rect);
- // Only the two audited Vulkan swapchain extent queries receive virtual size.
- // Window management, mouse coordinates and minimized windows retain real WSI.
- const bool swapchainCaller=caller==0x1d09134||caller==0x1d091ba;
- if(ok&&rect&&swapchainCaller&&rect->right>rect->left&&rect->bottom>rect->top){
-  rect->right=rect->left+LONG(eyeWidth);rect->bottom=rect->top+LONG(eyeHeight);
- }
- return ok;
-}
-uint32_t __fastcall renderWidth(void*){return eyeWidth;}
-uint32_t __fastcall renderHeight(void*){return eyeHeight;}
-}
+#include "RenderExtentHooks.inc"
 bool storeExecutable() noexcept {return approvedStoreImage();}
-bool installRenderExtent(uint32_t width,uint32_t height) noexcept {try{
- if(eyeWidth)return eyeWidth==width&&eyeHeight==height;
- if(!width||!height||!approvedImage())return false;
- auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
- // Eternal output-resolution accessors; independent from native window size.
- // Same approach as KHARVOX IndependentEngineSize, with Eternal signatures.
- constexpr unsigned char w[]={0x8b,0x05,0x0e,0xb3,0xce,0x01,0xc3,0xcc};
- constexpr unsigned char h[]={0x8b,0x05,0x22,0xb3,0xce,0x01,0xc3,0xcc};
- const bool store=approvedStoreImage();
- auto wt=base+build::rva(0x1cbf8d0);auto ht=base+build::rva(0x1cbf8c0);
- constexpr unsigned char storeW[]={0x8b,0x05,0x8e,0x0e,0xd1,0x01,0xc3,0xcc};
- constexpr unsigned char storeH[]={0x8b,0x05,0xa2,0x0e,0xd1,0x01,0xc3,0xcc};
- if(store ? (std::memcmp(wt,storeW,sizeof(storeW))||std::memcmp(ht,storeH,sizeof(storeH)))
-          : (std::memcmp(wt,w,sizeof(w))||std::memcmp(ht,h,sizeof(h))))return false;
- constexpr unsigned char rect1[]={0xff,0x15,0x14,0x2f,0xd1,0x00};
- constexpr unsigned char rect2[]={0xff,0x15,0x8e,0x2e,0xd1,0x00};
- constexpr unsigned char storeRect1[]={0xff,0x15,0x34,0x5c,0xd2,0x00};
- constexpr unsigned char storeRect2[]={0xff,0x15,0xae,0x5b,0xd2,0x00};
- if(store ? (std::memcmp(base+0x1d9568e,storeRect1,6)||std::memcmp(base+0x1d95714,storeRect2,6))
-          : (std::memcmp(base+0x1d0912e,rect1,6)||std::memcmp(base+0x1d091b4,rect2,6)))return false;
- constexpr unsigned char refresh[]={0x48,0x83,0xec,0x28,0x80,0x3d,0xe7,0xf1,0x9b,0x04,0x01,0x75,0x16};
- constexpr unsigned char storeRefresh[]={0x48,0x83,0xec,0x28,0x80,0x3d,0x57,0xa6,0x9e,0x04,0x01,0x75,0x16};
- auto rt=base+build::rva(0x1cbfa60);
- if(store?std::memcmp(rt,storeRefresh,sizeof(storeRefresh)):std::memcmp(rt,refresh,sizeof(refresh)))return false;
- auto init=MH_Initialize();if(init!=MH_OK&&init!=MH_ERROR_ALREADY_INITIALIZED)return false;
- if(MH_CreateHook(wt,reinterpret_cast<void*>(&renderWidth),nullptr)!=MH_OK)return false;
- if(MH_CreateHook(ht,reinterpret_cast<void*>(&renderHeight),nullptr)!=MH_OK){MH_RemoveHook(wt);return false;}
- if(MH_CreateHook(rt,reinterpret_cast<void*>(&refreshRenderExtent),reinterpret_cast<void**>(&nativeRefreshExtent))!=MH_OK){MH_RemoveHook(wt);MH_RemoveHook(ht);return false;}
- eyeWidth=width;eyeHeight=height;
- renderImageBase=reinterpret_cast<uintptr_t>(base);
- if(MH_EnableHook(wt)==MH_OK&&MH_EnableHook(ht)==MH_OK&&MH_EnableHook(rt)==MH_OK){
-  auto slot=reinterpret_cast<void**>(base+build::rva(0x2a1c048));DWORD protection{};
-  if(VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&protection)){
-   nativeClientRect=reinterpret_cast<ClientRect>(*slot);
-   InterlockedExchangePointer(slot,reinterpret_cast<void*>(&renderClientRect));DWORD ignored{};VirtualProtect(slot,sizeof(void*),protection,&ignored);
-   refreshRenderExtent();
-   log("ETERNAL_RENDER_EXTENT "+std::to_string(width)+"x"+std::to_string(height)+" engineAccessors=1 swapchainClientQueries=2 sceneRefresh=1");return true;
-  }
- }
- MH_DisableHook(wt);MH_DisableHook(ht);MH_DisableHook(rt);MH_RemoveHook(wt);MH_RemoveHook(ht);MH_RemoveHook(rt);eyeWidth=eyeHeight=0;return false;
- }catch(...){return false;}}
 bool install() noexcept {try{
+ std::lock_guard<std::mutex> installationLock(installationMutex);
  if(installed)return true;
  if(!approvedImage()){log("ETERNAL_HOOK refused: unsupported executable hash");return false;}
  auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
@@ -474,14 +419,14 @@ bool install() noexcept {try{
  if(!std::memcmp(finalizeTarget,finalizeBytes,sizeof(finalizeBytes))&&
     MH_CreateHook(finalizeTarget,reinterpret_cast<void*>(&finalizeCamera),reinterpret_cast<void**>(&originalFinalizeCamera))==MH_OK){
   fovGuardOk=MH_EnableHook(finalizeTarget)==MH_OK;
-  if(!fovGuardOk)MH_RemoveHook(finalizeTarget);
+  if(!fovGuardOk)removeOwnedCameraHook(finalizeTarget);
  }
- log("ETERNAL_ANIMATION_FOV installed="+std::to_string(fovGuardOk));
+ try{log("ETERNAL_ANIMATION_FOV installed="+std::to_string(fovGuardOk));}catch(...){}
 #ifndef ARGENT_CAMERA_TESTING
  const bool playerOk=player::install(base),presentationOk=presentation::install(base);
- if(!revenant::install(base))log("ETERNAL_REVENANT unavailable: native contract rejected");
+ if(!revenant::install(base))try{log("ETERNAL_REVENANT unavailable: native contract rejected");}catch(...){}
  const bool hudOk=hud::installWeaponWheel(base),hitOk=hud::installHitMarkerSuppression(base);
- log("ETERNAL_BUILD_HOOKS player="+std::to_string(playerOk)+" presentation="+std::to_string(presentationOk)+" hud="+std::to_string(hudOk)+" hitmarkers="+std::to_string(hitOk));
+ try{log("ETERNAL_BUILD_HOOKS player="+std::to_string(playerOk)+" presentation="+std::to_string(presentationOk)+" hud="+std::to_string(hudOk)+" hitmarkers="+std::to_string(hitOk));}catch(...){}
 #endif
  // Both functions are covered by approvedImage; also check full entry bytes.
  constexpr unsigned char pollBytes[]={0x48,0x89,0x5c,0x24,0x18,0x57,0x48,0x83,0xec,0x40};
@@ -490,9 +435,10 @@ bool install() noexcept {try{
   discover=reinterpret_cast<Discover>(base+build::rva(0x1dc48f0));
   const auto result=MH_CreateHook(base+build::rva(0x1dc57a0),reinterpret_cast<void*>(&pollController),reinterpret_cast<void**>(&originalPoll));
   const bool enabled=result==MH_OK&&MH_EnableHook(base+build::rva(0x1dc57a0))==MH_OK;
-  log("ETERNAL_INPUT_DISCOVERY installed="+std::to_string(enabled));
+  if(result==MH_OK&&!enabled)removeOwnedCameraHook(base+build::rva(0x1dc57a0));
+  try{log("ETERNAL_INPUT_DISCOVERY installed="+std::to_string(enabled));}catch(...){}
  }
- log("ETERNAL_HOOK installed verified camera setter; 6DoF view, unitsPerMeter="+std::to_string(unitsPerMeter())+"; dormant in quad; physics body unchanged");return true;
+ try{log("ETERNAL_HOOK installed verified camera setter; 6DoF view, unitsPerMeter="+std::to_string(unitsPerMeter())+"; dormant in quad; physics body unchanged");}catch(...){}return true;
  }catch(...){return false;}}
 void stop() noexcept {
  {std::lock_guard<std::mutex> lock(poseMutex);++weaponEpoch;input::weaponApplied({});placedWorldHands={};active=false;needReference=true;needPositionReference=true;translate=false;historyCursor=0;matchedSerial=0;follow={};bodyValid=false;anchorOwner=0;animationActive=false;input::followStick({});input::followTurn(0);yawFollow={};}
@@ -540,7 +486,7 @@ void updatePose(XrPosef head,bool world,bool recenter,bool positionTracked) noex
  // unintended climb-stick command. HMD and managed visual turning remain free.
  input::headMovement(gameplay&&!viewActor&&!climbing?moveDirection:0);
  input::followTurn(yawFollow.request(movementYaw,(!controls.snapTurn&&!controls.managedTurn&&std::abs(int(controls.pad.sThumbRX))>4915)||(controls.pad.wButtons&XINPUT_GAMEPAD_RIGHT_SHOULDER),!viewActor&&!climbing&&gameplay&&active&&!needReference&&bodyValid&&GetTickCount64()-physicsTick<100&&input::fresh(controls,GetTickCount64())));
- static unsigned bodyReport{};if(extendedLogging()&&++bodyReport%300==0)log("ETERNAL_BODY_YAW accepted="+std::to_string(yawFollow.accepted)+" residual="+std::to_string(movementYaw)+" command="+std::to_string(yawFollow.command));
+ static unsigned bodyReport{};if(extendedLogging()&&++bodyReport%300==0)try{log("ETERNAL_BODY_YAW accepted="+std::to_string(yawFollow.accepted)+" residual="+std::to_string(movementYaw)+" command="+std::to_string(yawFollow.command));}catch(...){}
  const bool ready=!climbing&&gameplay&&active&&translate&&!needReference&&!needPositionReference&&bodyValid&&GetTickCount64()-physicsTick<100&&input::fresh(controls,GetTickCount64())&&(!viewActor||controls.revenantActor==viewActor);
  const bool manual=std::abs(int(controls.pad.sThumbLX))>4915||std::abs(int(controls.pad.sThumbLY))>4915;
  auto room=follow.update(physicsOwner,physicsPosition,head.position,referencePosition,bodyBasis,yawFollow.reference(reference),unitsPerMeter(),manual,ready);
