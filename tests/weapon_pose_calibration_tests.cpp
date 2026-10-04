@@ -5,6 +5,12 @@
 #include <stdexcept>
 #include <iostream>
 void check(bool v,const char* why){if(!v)throw std::runtime_error(why);}
+class FailedConfigurationBuffer : public std::streambuf {
+ std::string text;
+public:
+ explicit FailedConfigurationBuffer(std::string value):text(std::move(value)){setg(text.data(),text.data(),text.data()+text.size());}
+ int_type underflow()override{throw std::ios_base::failure("Configuration read failure");}
+};
 int main(){try{
  using namespace argent::input;
  {
@@ -107,6 +113,17 @@ int main(){try{
  WeaponConfig config;std::istringstream valid("show_hands 1\ncalibration_mode hands\nprofile ballista\n");
  check(readWeaponConfig(valid,config)&&config.showHands&&config.calibrationMode=="hands"&&config.profile=="ballista","Calibration config not accepted");
  std::istringstream invalid("calibration_mode anything\n");check(!readWeaponConfig(invalid,config),"Unknown mode accepted");
+ unsigned configCases{},configFailures{};
+ const auto reject=[&](std::istream& stream,const char* name){
+  auto candidate=config;++configCases;
+  if(readWeaponConfig(stream,candidate)||candidate.profile!=config.profile||candidate.calibrationMode!=config.calibrationMode||candidate.leftHanded!=config.leftHanded){++configFailures;std::cerr<<name<<": invalid configuration published\n";}
+ };
+ for(const auto text:{"calibration_mode", "calibration_apply_profile", "calibration_apply_mode", "profile"}){std::istringstream row(text);reject(row,text);}
+ for(const auto state:{std::ios::badbit,std::ios::failbit}){std::istringstream rows("dominant left\n");rows.setstate(state);reject(rows,state==std::ios::badbit?"bad stream":"failed stream");}
+ FailedConfigurationBuffer failedBuffer("dominant left\n");std::istream failedInput(&failedBuffer);reject(failedInput,"failure after complete row");
+ std::istringstream empty("");WeaponConfig defaults;++configCases;if(!readWeaponConfig(empty,defaults)||defaults.profile!="default")++configFailures;
+ std::istringstream lastRow("calibration_mode hands");++configCases;if(!readWeaponConfig(lastRow,defaults)||defaults.calibrationMode!="hands")++configFailures;
+ std::cout<<configCases<<" configuration boundary scenarios, "<<configFailures<<" failures\n";check(!configFailures,"Configuration boundaries failed");
  restored.mode=kharvox::hands::CalibrationMode::Position;
  restored.step("crucible",false,keys,false,false);restored.step("crucible",true,keys,true,false);
  check(restored.save(),"Crucible calibration save failed");WeaponPoseCalibration sword;sword.load(root);

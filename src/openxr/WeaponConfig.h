@@ -40,10 +40,10 @@ inline bool readWeaponConfig(std::istream& input,WeaponConfig& output){
   else if(key=="hand_smoothing"){int v;if(!(row>>v)||v<0||v>1)return false;next.handSmoothing=v!=0;}
   else if(key=="laser_sight"){int v;if(!(row>>v)||v<0||v>1)return false;next.laserSight=v!=0;}
   else if(key=="cinematics_3d"){int v;if(!(row>>v)||v<0||v>1)return false;next.cinematics3d=v!=0;}
-  else if(key=="calibration_mode"){row>>next.calibrationMode;if(next.calibrationMode!="off"&&next.calibrationMode!="hands"&&next.calibrationMode!="weapon"&&next.calibrationMode!="support"&&next.calibrationMode!="hud")return false;}
+  else if(key=="calibration_mode"){if(!(row>>next.calibrationMode)||(next.calibrationMode!="off"&&next.calibrationMode!="hands"&&next.calibrationMode!="weapon"&&next.calibrationMode!="support"&&next.calibrationMode!="hud"))return false;}
   else if(key=="calibration_apply"){if(!(row>>next.calibrationApply.revision))return false;}
-  else if(key=="calibration_apply_profile"){row>>next.calibrationApply.profile;}
-  else if(key=="calibration_apply_mode"){row>>next.calibrationApply.mode;}
+  else if(key=="calibration_apply_profile"){if(!(row>>next.calibrationApply.profile))return false;}
+  else if(key=="calibration_apply_mode"){if(!(row>>next.calibrationApply.mode))return false;}
   else if(key=="calibration_apply_left"){int v;if(!(row>>v)||v<0||v>1)return false;next.calibrationApply.left=v!=0;}
   else if(key=="movement"){std::string value;row>>value;if(value!="head"&&value!="offhand")return false;next.offhandMovement=value=="offhand";}
   else if(key=="turn"){std::string mode;row>>mode;if(mode!="smooth"&&mode!="snap")return false;next.snapTurn=mode=="snap";if(next.snapTurn&&(!(row>>next.snapDegrees)||!std::isfinite(next.snapDegrees)||next.snapDegrees<10||next.snapDegrees>180))return false;}
@@ -65,7 +65,7 @@ inline bool readWeaponConfig(std::istream& input,WeaponConfig& output){
    else next.twoHandEnabled=value;
   }
   else if(key=="controller_layout"){std::string v;row>>v;if(v!="argent"&&v!="legacy")return false;next.legacyLayout=v=="legacy";}
-  else if(key=="profile"){row>>next.profile;if(next.profile.empty())return false;}
+  else if(key=="profile"){if(!(row>>next.profile)||next.profile.empty())return false;}
   else if(key=="capture_support"){int v;if(!(row>>v)||v<0||v>1)return false;next.captureSupport=v!=0;}
   else if(key=="hand"||key=="weapon"){
    std::string name;PoseCalibration p;float pitch,yaw,roll;
@@ -77,6 +77,7 @@ inline bool readWeaponConfig(std::istream& input,WeaponConfig& output){
     c.twoHand=enabled!=0;next.weapons[name]=c;}
   }else return false;
  }
+ if(input.bad()||!input.eof())return false;
  if(!next.weapons.count(next.profile)&&kharvox::hands::handProfile(next.profile)==kharvox::hands::HandWeaponKind::Unknown)return false;output=next;return true;
 }
 }
