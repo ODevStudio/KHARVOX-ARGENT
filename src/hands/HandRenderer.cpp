@@ -3,6 +3,7 @@
 #include "HandCalibrationPolicy.h"
 #include "CalibrationDraft.h"
 #include "CalibrationFile.h"
+#include "HandConfigurationFile.h"
 #include "HandDispatch.h"
 #include "HandSceneFramebuffers.h"
 #include "HandHudMaskSpv.h"
@@ -558,39 +559,7 @@ const HandCalibration&HandRenderer::Impl::selectedCalibration()const{
     return renderCalibration(calibrateLeft,HandModelKind::GunHolding,calibrationWeapon,calibrationLeftHanded);
 }
 
-void HandRenderer::Impl::loadCalibrationFile(const wchar_t* filename, bool defaults){
-    std::ifstream input(root/filename);
-    // Repository defaults are the baseline. A legacy v1 save deliberately
-    // uses its global wrists for every weapon; partial v2 saves override only
-    // their named profiles, preserving all other accepted defaults.
-    auto resetWeaponProfiles=[&]{
-        for(auto&profile:weaponCalibrations){profile[0]=leftCalibration;
-            profile[1]=rightCalibration;}
-    };
-    if(!input){if(defaults){resetWeaponProfiles();say("hand calibration defaults missing; using hand_models.cfg wrists");}return;}
-    std::unordered_map<std::string,std::string>values;std::string line;
-    while(std::getline(input,line)){line=trim(line);if(line.empty()||line[0]=='#')continue;const auto equals=line.find('=');if(equals!=std::string::npos)values[trim(line.substr(0,equals))]=trim(line.substr(equals+1));}
-    auto vector3=[&](const std::string&key,float value[3]){const auto found=values.find(key);if(found==values.end())return false;std::istringstream stream(found->second);float parsed[3]{};if(!(stream>>parsed[0]>>parsed[1]>>parsed[2])||!std::isfinite(parsed[0])||!std::isfinite(parsed[1])||!std::isfinite(parsed[2]))return false;std::copy_n(parsed,3,value);return true;};
-    const bool leftPosition=vector3("left_position",leftCalibration.position);
-    const bool leftRotation=vector3("left_rotation",leftCalibration.rotationDegrees);
-    const bool rightPosition=vector3("right_position",rightCalibration.position);
-    const bool rightRotation=vector3("right_rotation",rightCalibration.rotationDegrees);
-    if(defaults || values["version"] != "2") resetWeaponProfiles();
-    unsigned profileValues{};
-    for(int value=static_cast<int>(HandWeaponKind::CombatShotgun);
-        value<static_cast<int>(HandWeaponKind::Count);++value){
-        const auto weapon=static_cast<HandWeaponKind>(value);
-        const std::string key=HandWeaponKindKey(weapon);
-        auto&profile=weaponCalibrations[static_cast<size_t>(weapon)];
-        profileValues+=vector3(key+"_left_position",profile[0].position)?1u:0u;
-        profileValues+=vector3(key+"_left_rotation",profile[0].rotationDegrees)?1u:0u;
-        profileValues+=vector3(key+"_right_position",profile[1].position)?1u:0u;
-        profileValues+=vector3(key+"_right_rotation",profile[1].rotationDegrees)?1u:0u;
-    }
-    if(leftPosition||leftRotation||rightPosition||rightRotation||profileValues)
-        say(std::string(defaults?"default":"saved")+" hand calibration loaded; per-weapon values="
-            +std::to_string(profileValues));
-}
+#include "HandLegacyCalibration.inc"
 
 void HandRenderer::Impl::writeCalibrationStatus(const char*message)const{
     if(calibrationMode==CalibrationMode::None)return;
