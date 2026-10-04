@@ -52,5 +52,6 @@ VkExtent2D fsrOutput(const Source& source,VkFormat targetFormat){
  // Pass display format, not attachment format: Eternal's UNORM bytes are
  // display-encoded. RCAS decodes once before the final UNORM->sRGB blit.
  if(!fsr1.initialize(device.physical,device.device,dispatch,targetFormat,source.extent,output))return source.extent;
+ if(source.sampled&&sfs::sourceRingActive(device.device))fsr1.configureStereoSources(source.format,source.images);
  return output;
 }
