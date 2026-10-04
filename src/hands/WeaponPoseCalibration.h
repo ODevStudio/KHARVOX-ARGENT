@@ -2,6 +2,7 @@
 #include <windows.h>
 #include "HandCalibrationPolicy.h"
 #include "CalibrationDraft.h"
+#include "CalibrationFile.h"
 #include "../openxr/WeaponConfig.h"
 #include <iomanip>
 namespace argent::input {
@@ -19,9 +20,11 @@ public:
  static std::string key(const std::string& profile,bool left){return profile+(left?"_left":"_right");}
  void load(const std::filesystem::path& directory){if(loaded)return;root=directory;loaded=true;
   for(const auto* filename:{L"weapon_pose_calibration_default.cfg",L"weapon_pose_calibration_saved.cfg"}){
-  std::ifstream in(root/filename);std::string line;
-  while(std::getline(in,line)){std::istringstream row(line);std::string name;Delta d;
-   if(row>>name>>d.position.x>>d.position.y>>d.position.z>>d.degrees.x>>d.degrees.y>>d.degrees.z){if(valid(d))draft.saved[name]=d;}}}
+   calibration::readCalibrationFile(root/filename,draft.saved,[](auto& row,Delta& value){
+    return bool(row>>value.position.x>>value.position.y>>value.position.z
+     >>value.degrees.x>>value.degrees.y>>value.degrees.z)&&valid(value);
+   });
+  }
  }
  Delta resolved(const std::string& profile,bool left)const{
   auto value=draft.find(key(profile,left));

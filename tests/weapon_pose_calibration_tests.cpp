@@ -1,4 +1,4 @@
-#include "../src/hands/WeaponPoseCalibration.h"
+#include "../src/openxr/WeaponConfig.h"
 #include "../src/openxr/SupportCalibration.h"
 #include "../src/weapon/EternalHapticsWeapon.h"
 #include "../src/WeaponAttachmentCalibration.h"
@@ -7,6 +7,7 @@
 #include <iostream>
 void check(bool v,const char* why){if(!v)throw std::runtime_error(why);}
 #include "xr_configuration_fixture.h"
+#include "../src/hands/WeaponPoseCalibration.h"
 class FailedConfigurationBuffer : public std::streambuf {
  std::string text;
 public:
