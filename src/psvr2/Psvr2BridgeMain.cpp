@@ -14,6 +14,7 @@
 
 #include "Psvr2IpcProtocol.h"
 #include "Psvr2ToolkitBackend.h"
+#include "../common/OverlappedIo.h"
 
 namespace {
 
@@ -197,10 +198,9 @@ HANDLE createAndConnectPipe(const std::wstring& path,
             CloseHandle(pipe);
             return INVALID_HANDLE_VALUE;
         }
-        if (wait == WAIT_OBJECT_0 + 1 || wait == WAIT_OBJECT_0 + 2) break;
+        if (wait != WAIT_TIMEOUT) break;
     }
-    CancelIoEx(pipe, &overlapped);
-    WaitForSingleObject(overlapped.hEvent, 50);
+    kharvox::cancelAndDrainOverlappedIo(pipe, overlapped);
     CloseHandle(overlapped.hEvent);
     CloseHandle(pipe);
     return INVALID_HANDLE_VALUE;
@@ -225,8 +225,7 @@ bool readExact(HANDLE pipe, HANDLE parent, void* destination,
             if (wait == WAIT_OBJECT_0)
                 success = GetOverlappedResult(pipe, &overlapped, &read, FALSE) != FALSE;
             else {
-                CancelIoEx(pipe, &overlapped);
-                WaitForSingleObject(overlapped.hEvent, 50);
+                kharvox::cancelAndDrainOverlappedIo(pipe, overlapped);
                 success = false;
             }
         }
@@ -301,6 +300,26 @@ DWORD WINAPI pipeThreadMain(void* rawContext) {
     }
     return 0;
 }
+
+struct PipeThread {
+    HANDLE handle{};
+    explicit PipeThread(HANDLE value) noexcept : handle(value) {}
+    PipeThread(const PipeThread&) = delete;
+    PipeThread& operator=(const PipeThread&) = delete;
+    ~PipeThread() { stop(); }
+
+    void stop() noexcept {
+        if (!handle) return;
+        shutdownRequested.store(true, std::memory_order_release);
+        SetEvent(shutdownEvent);
+        if (WaitForSingleObject(handle, INFINITE) != WAIT_OBJECT_0) {
+            RaiseFailFastException(nullptr, nullptr, 0);
+            std::abort();
+        }
+        CloseHandle(handle);
+        handle = nullptr;
+    }
+};
 
 int applyDesired(kharvox::psvr2::Psvr2ToolkitBackend& backend,
     const kharvox::psvr2::TriggerCommand& command,
@@ -401,9 +420,9 @@ int wmain() {
 
         PipeThreadContext pipeContext{
             L"\\\\.\\pipe\\" + pipeName, token, &security.attributes, parent};
-        HANDLE pipeThread = CreateThread(nullptr, 0, pipeThreadMain,
-            &pipeContext, 0, nullptr);
-        if (!pipeThread) {
+        PipeThread pipeThread{CreateThread(nullptr, 0, pipeThreadMain,
+            &pipeContext, 0, nullptr)};
+        if (!pipeThread.handle) {
             CloseHandle(shutdownEvent);
             CloseHandle(parent);
             return 6;
@@ -523,8 +542,7 @@ int wmain() {
         SetEvent(shutdownEvent);
         backend.shutdown();
         backend.unload();
-        WaitForSingleObject(pipeThread, 2000);
-        CloseHandle(pipeThread);
+        pipeThread.stop();
         CloseHandle(shutdownEvent);
         shutdownEvent = nullptr;
         CloseHandle(parent);
