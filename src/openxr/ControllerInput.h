@@ -9,6 +9,7 @@
 #include <cstring>
 #include <atomic>
 #include "MovementDirectionPolicy.h"
+#include "XInputIatHook.h"
 
 namespace argent::input {
 // Frame snapshots, not independent atomics: XInput must see a coherent action
@@ -43,7 +44,7 @@ inline bool samePad(const XINPUT_GAMEPAD& a,const XINPUT_GAMEPAD& b){
   a.sThumbLX==b.sThumbLX&&a.sThumbLY==b.sThumbLY&&a.sThumbRX==b.sThumbRX&&a.sThumbRY==b.sThumbRY;
 }
 using GetState=DWORD(WINAPI*)(DWORD,XINPUT_STATE*);
-inline GetState originalGetState{};
+inline std::atomic<GetState> originalGetState{};
 inline std::atomic<uint64_t> getStateCalls{},injectedCalls{};
 inline SHORT axis(float value){return std::isfinite(value)?SHORT(std::clamp(value,-1.f,1.f)*32767.f):0;}
 inline BYTE trigger(float value){return std::isfinite(value)?BYTE(std::clamp(value,0.f,1.f)*255.f):0;}
@@ -58,7 +59,7 @@ inline void merge(XINPUT_GAMEPAD& native,const XINPUT_GAMEPAD& vr){
 }
 inline DWORD WINAPI getState(DWORD user,XINPUT_STATE* output){
  ++getStateCalls;
- const DWORD result=originalGetState?originalGetState(user,output):ERROR_DEVICE_NOT_CONNECTED;
+ const auto native=originalGetState.load();const DWORD result=native?native(user,output):ERROR_DEVICE_NOT_CONNECTED;
  if(user!=0||!output)return result;
  std::lock_guard<std::mutex> lock(stateMutex);const auto now=GetTickCount64();
  if(!fresh(state,now)){deliveredPadValid=false;return result;}
@@ -80,30 +81,5 @@ inline DWORD WINAPI getState(DWORD user,XINPUT_STATE* output){
 // KHARVOX uses a main-module XInput IAT bridge. Eternal imports GetState by
 // ordinal (2 in its shipped XInput1_3), so identify the resolved export address,
 // never assume a common ordinal number or patch unrelated DLL imports.
-inline bool install(){
- static bool installed=false;if(installed)return true;
- auto base=reinterpret_cast<unsigned char*>(GetModuleHandleW(nullptr));
- const auto dos=reinterpret_cast<IMAGE_DOS_HEADER*>(base);
- if(dos->e_magic!=IMAGE_DOS_SIGNATURE)return false;
- const auto nt=reinterpret_cast<IMAGE_NT_HEADERS64*>(base+dos->e_lfanew);
- if(nt->Signature!=IMAGE_NT_SIGNATURE)return false;
- const auto directory=nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
- if(!directory.VirtualAddress)return false;
- const auto imports=reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base+directory.VirtualAddress);
- for(auto row=imports;row->Name;++row){
-  const char* name=reinterpret_cast<char*>(base+row->Name);
-  if(_stricmp(name,"xinput1_3.dll")&&_stricmp(name,"xinput1_4.dll")&&_stricmp(name,"xinput9_1_0.dll"))continue;
-  auto library=GetModuleHandleA(name);if(!library)continue;
-  auto expected=GetProcAddress(library,"XInputGetState");if(!expected)continue;
-  for(auto thunk=reinterpret_cast<IMAGE_THUNK_DATA64*>(base+row->FirstThunk);thunk->u1.Function;++thunk){
-   if(thunk->u1.Function!=reinterpret_cast<uintptr_t>(expected))continue;
-   HMODULE pin{};if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&getState),&pin))return false;
-   DWORD previous{};if(!VirtualProtect(&thunk->u1.Function,sizeof(void*),PAGE_READWRITE,&previous))return false;
-   originalGetState=reinterpret_cast<GetState>(expected);
-   InterlockedExchangePointer(reinterpret_cast<void* volatile*>(&thunk->u1.Function),reinterpret_cast<void*>(&getState));
-   DWORD ignored{};VirtualProtect(&thunk->u1.Function,sizeof(void*),previous,&ignored);installed=true;return true;
-  }
- }
- return false;
-}
+inline bool install() noexcept {return installXInputIatHook("XInputGetState",&getState,originalGetState);}
 }
