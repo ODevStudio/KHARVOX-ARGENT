@@ -115,7 +115,7 @@ bool initializePauseBindings(const std::vector<int64_t>& formats) {
         {
             std::lock_guard<std::recursive_mutex> access(*device.queueMutex);
             if (VK(vkQueueSubmit)(boundQueue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS) break;
-            if (VK(vkQueueWaitIdle)(boundQueue) != VK_SUCCESS) break;
+            if (requireGpuRetirement(VK(vkQueueWaitIdle)(boundQueue), "pause bindings upload") != VK_SUCCESS) { imageWaited=false; break; }
         }
         XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         ok = XR_SUCCEEDED(XR(xrReleaseSwapchainImage)(pauseBindings.handle, &release));

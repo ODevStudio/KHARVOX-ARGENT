@@ -4,11 +4,53 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
+static PFN_vkQueueWaitIdle queueWaitIdle{};
+static PFN_vkDestroyBuffer destroyBuffer{};
+static PFN_vkResetCommandBuffer resetCommandBuffer{};
+static PFN_vkBeginCommandBuffer beginCommandBuffer{};
+static VkResult injectedIdleResult=VK_SUCCESS;
+static bool retirementUnverified{},failReset{},resetFailed{};
+static VkResult VKAPI_CALL checkedQueueWaitIdle(VkQueue queue){
+    const auto result=queueWaitIdle(queue);
+    if(result!=VK_SUCCESS)return result;
+    const auto injected=injectedIdleResult;injectedIdleResult=VK_SUCCESS;
+    retirementUnverified=injected!=VK_SUCCESS&&injected!=VK_ERROR_DEVICE_LOST;
+    return injected;
+}
+static void VKAPI_CALL checkedDestroyBuffer(VkDevice device,VkBuffer buffer,const VkAllocationCallbacks* allocator){
+    if(retirementUnverified)ExitProcess(86);
+    destroyBuffer(device,buffer,allocator);
+}
+static VkResult VKAPI_CALL checkedResetCommandBuffer(VkCommandBuffer command,VkCommandBufferResetFlags flags){
+    resetFailed=failReset;failReset=false;
+    return resetFailed?VK_ERROR_OUT_OF_HOST_MEMORY:resetCommandBuffer(command,flags);
+}
+static VkResult VKAPI_CALL checkedBeginCommandBuffer(VkCommandBuffer command,const VkCommandBufferBeginInfo* info){
+    if(resetFailed)ExitProcess(87);
+    return beginCommandBuffer(command,info);
+}
+static PFN_vkCreateFramebuffer createFramebuffer{};
+static PFN_vkDestroyFramebuffer destroyFramebuffer{};
+static unsigned framebuffersCreated{},framebuffersDestroyed{};
+static VkResult VKAPI_CALL countedCreateFramebuffer(VkDevice device,const VkFramebufferCreateInfo* info,
+    const VkAllocationCallbacks* allocator,VkFramebuffer* framebuffer){
+    const auto result=createFramebuffer(device,info,allocator,framebuffer);
+    if(result==VK_SUCCESS)++framebuffersCreated;
+    return result;
+}
+static void VKAPI_CALL countedDestroyFramebuffer(VkDevice device,VkFramebuffer framebuffer,const VkAllocationCallbacks* allocator){
+    if(retirementUnverified)ExitProcess(86);
+    ++framebuffersDestroyed;destroyFramebuffer(device,framebuffer,allocator);
+}
 static void check(bool v,const char* reason){if(!v)throw std::runtime_error(reason);}
 static void ok(VkResult r){check(r==VK_SUCCESS,"Vulkan operation failed");}
 int main(int argc,char**argv){try{
+SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);
 check(argc==2||argc==3,"Missing runtime fixture");
-const bool separateEyes=argc==3;
+const std::string_view mode=argc==3?argv[2]:"";
+const bool separateEyes=mode=="--separate-eyes";
+const bool partialInitialization=mode=="--fail-reset"||mode=="--lost-upload";
     auto loader=LoadLibraryW(L"vulkan-1.dll");check(loader,"Vulkan loader unavailable");
     auto gipa=reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader,"vkGetInstanceProcAddr"));
     auto createInstance=reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr,"vkCreateInstance"));
@@ -109,6 +151,10 @@ const bool separateEyes=argc==3;
     dispatch.waitForFences=reinterpret_cast<PFN_vkWaitForFences>(vkGetDeviceProcAddr(device,"vkWaitForFences"));
     dispatch.queueSubmit=reinterpret_cast<PFN_vkQueueSubmit>(vkGetDeviceProcAddr(device,"vkQueueSubmit"));
     dispatch.queueWaitIdle=reinterpret_cast<PFN_vkQueueWaitIdle>(vkGetDeviceProcAddr(device,"vkQueueWaitIdle"));
+    queueWaitIdle=dispatch.queueWaitIdle;dispatch.queueWaitIdle=checkedQueueWaitIdle;
+    destroyBuffer=dispatch.destroyBuffer;dispatch.destroyBuffer=checkedDestroyBuffer;
+    resetCommandBuffer=dispatch.resetCommandBuffer;dispatch.resetCommandBuffer=checkedResetCommandBuffer;
+    beginCommandBuffer=dispatch.beginCommandBuffer;dispatch.beginCommandBuffer=checkedBeginCommandBuffer;
 
     auto clearDepth=reinterpret_cast<PFN_vkCmdClearDepthStencilImage>(vkGetDeviceProcAddr(device,"vkCmdClearDepthStencilImage"));
     dispatch.getPhysicalDeviceFormatProperties=reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties>(gipa(instance,"vkGetPhysicalDeviceFormatProperties"));
@@ -146,13 +192,23 @@ const bool separateEyes=argc==3;
     auto transition=[&](VkImageLayout old,VkImageLayout next){for(unsigned e=0;e<(separateEyes?2u:1u);++e){VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.oldLayout=old;b.newLayout=next;b.srcAccessMask=old==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=colors[e];b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,ci.arrayLayers};vkCmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);}};
     using namespace kharvox::hands;
     HandRenderer renderer;
+    createFramebuffer=dispatch.createFramebuffer;dispatch.createFramebuffer=countedCreateFramebuffer;
+    destroyFramebuffer=dispatch.destroyFramebuffer;dispatch.destroyFramebuffer=countedDestroyFramebuffer;
     std::array<std::vector<VkImage>,2> images{{{image},{rightImage}}};
+    if(mode=="--fail-upload-retirement")injectedIdleResult=VK_ERROR_OUT_OF_HOST_MEMORY;
+    if(mode=="--lost-upload")injectedIdleResult=VK_ERROR_DEVICE_LOST;
+    failReset=mode=="--fail-reset";
     check(renderer.initialize(physical,device,queue,family,dispatch,ci.format,{{{width,height},{width,height}}},images,std::filesystem::path(argv[1]).wstring(),[](const std::string&s){std::cout<<s<<'\n';},!separateEyes),"Hand initialization failed");
-    auto available=renderer.availability();check(available.leftFist&&available.rightFist&&available.leftGun&&available.rightGun,"One or more models failed to load");
+    if(mode=="--fail-shutdown-retirement"){
+        injectedIdleResult=VK_ERROR_OUT_OF_HOST_MEMORY;
+        renderer.shutdown();
+        check(false,"Unverified shutdown returned");
+    }
+    auto available=renderer.availability();check(available.leftFist==!partialInitialization&&available.rightFist&&available.leftGun&&available.rightGun,"Unexpected model availability after initialization");
     HandEyeView view;view.pose.valid=true;view.angleLeft=view.angleDown=-.785398f;view.angleRight=view.angleUp=.785398f;view.imageRectWidth=width;view.imageRectHeight=height;
     HandPose grip;grip.valid=true;grip.position[2]=-.5f;
     std::array<std::vector<unsigned char>,8> baseline;
-    for(unsigned frame=0;frame<120;++frame){
+    for(unsigned frame=0;frame<(partialInitialization?0u:120u);++frame){
         if(frame==8){renderer.shutdown();check(renderer.initialize(physical,device,queue,family,dispatch,ci.format,{{{width,height},{width,height}}},images,std::filesystem::path(argv[1]).wstring(),{},!separateEyes,true),"Scene-only initialization failed");}
         const unsigned eye=frame%2;HandVisibilityOutput visible;
         switch((frame/2)%4){case 0:visible.left=HandModelKind::Fist;break;case 1:visible.right=HandModelKind::GunHolding;break;case 2:visible.right=HandModelKind::Fist;break;default:visible.left=HandModelKind::GunHolding;break;}
@@ -236,8 +292,11 @@ const bool separateEyes=argc==3;
         }
         vkUnmapMemory(device,host);std::cout<<"frame "<<frame<<" changed="<<changed[0]<<","<<changed[1]<<'\n';
         renderer.finishSceneIntegratedFrame();
+        if(frame>=18)check(framebuffersCreated==6&&framebuffersDestroyed==2,"Stable scene framebuffers were recreated or destroyed per frame");
         check(partialMask||(occluded||hudMask?changed[eye]==0:changed[eye]>(laserOnly?0:20)),"Hand/laser visibility/HUD protection failed");check(changed[1-eye]==0,"Hand/laser leaked into other array eye");check(changed[eye]<width*height/2,"Hand overwrote background");
     }
+    if(mode=="--lost-shutdown")injectedIdleResult=VK_ERROR_DEVICE_LOST;
     renderer.shutdown();if(separateEyes){vkDestroyImage(device,rightImage,nullptr);vkFreeMemory(device,rightMemory,nullptr);}dispatch.destroyImageView(device,depthView,nullptr);dispatch.destroyImage(device,depthImage,nullptr);dispatch.freeMemory(device,depthMemory,nullptr);vkDestroyImage(device,image,nullptr);vkFreeMemory(device,imageMemory,nullptr);vkDestroyBuffer(device,readback,nullptr);vkFreeMemory(device,host,nullptr);vkDestroyCommandPool(device,pool,nullptr);vkDestroyDevice(device,nullptr);vkDestroyInstance(instance,nullptr);FreeLibrary(loader);
-    std::cout<<"PASS: fist and gun hands, both array eyes, background preserved\n";return 0;
+    check(framebuffersCreated==framebuffersDestroyed,"Framebuffer cache leaked during shutdown");
+    std::cout<<(partialInitialization?"PASS: failed hand upload disabled without unsafe recording or cleanup\n":"PASS: fist and gun hands, both array eyes, background preserved\n");return 0;
 }catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
