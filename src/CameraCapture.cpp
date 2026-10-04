@@ -3,6 +3,7 @@
 #include "EternalCameraHook.h"
 #include "RenderTrace.h"
 #include "sfs/EternalProjection.h"
+#include "vulkan/GpuRetirement.h"
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
@@ -188,27 +189,54 @@ void CameraCapture::submit(VkQueue queue,uint32_t n,const VkCommandBuffer* submi
 }
 void CameraCapture::readback(Device& d,VkQueue queue,uint32_t family,bool probeOnly){
     std::vector<Readback> requests;{std::unique_lock<std::shared_mutex> guard(mutex);requests.swap(probeOnly?pendingProbeReadback:pendingReadback);if(probeOnly)probeGpuReady.store(false,std::memory_order_relaxed);}if(requests.empty())return;
-    VkBuffer buffer{};VkDeviceMemory memory{};VkCommandPool pool{};VkCommandBuffer command{};VkFence fence{};bool submitted=false;
     auto check=[](VkResult r){if(r!=VK_SUCCESS)throw std::runtime_error("Camera GPU readback result="+std::to_string(r));};
 #define GPU(name) d.proc<PFN_##name>(#name)
-    auto cleanup=[&]{if(submitted)GPU(vkQueueWaitIdle)(queue);if(fence)GPU(vkDestroyFence)(d.device,fence,nullptr);if(pool)GPU(vkDestroyCommandPool)(d.device,pool,nullptr);if(buffer)GPU(vkDestroyBuffer)(d.device,buffer,nullptr);if(memory)GPU(vkFreeMemory)(d.device,memory,nullptr);};
     try{
-        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};for(const auto& r:requests)bi.size+=r.size;bi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;check(GPU(vkCreateBuffer)(d.device,&bi,nullptr,&buffer));
+        std::lock_guard<std::recursive_mutex> queueGuard(*d.queueMutex);
+        struct Resources {
+            Device& d;VkQueue queue;
+            PFN_vkQueueWaitIdle idle=d.proc<PFN_vkQueueWaitIdle>("vkQueueWaitIdle");
+            PFN_vkUnmapMemory unmap=d.proc<PFN_vkUnmapMemory>("vkUnmapMemory");
+            PFN_vkDestroyFence destroyFence=d.proc<PFN_vkDestroyFence>("vkDestroyFence");
+            PFN_vkDestroyCommandPool destroyPool=d.proc<PFN_vkDestroyCommandPool>("vkDestroyCommandPool");
+            PFN_vkDestroyBuffer destroyBuffer=d.proc<PFN_vkDestroyBuffer>("vkDestroyBuffer");
+            PFN_vkFreeMemory freeMemory=d.proc<PFN_vkFreeMemory>("vkFreeMemory");
+            VkBuffer buffer{};VkDeviceMemory memory{};VkCommandPool pool{};VkFence fence{};void* mapped{};bool submitted{};
+            ~Resources(){
+                if(submitted)requireGpuRetirement(idle(queue),"camera readback");
+                if(mapped)unmap(d.device,memory);
+                if(fence)destroyFence(d.device,fence,nullptr);
+                if(pool)destroyPool(d.device,pool,nullptr);
+                if(buffer)destroyBuffer(d.device,buffer,nullptr);
+                if(memory)freeMemory(d.device,memory,nullptr);
+            }
+        } resources{d,queue};
+        if(!resources.idle||!resources.unmap||!resources.destroyFence||!resources.destroyPool||!resources.destroyBuffer||!resources.freeMemory)throw std::runtime_error("Camera readback cleanup dispatch unavailable");
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};for(const auto& r:requests)bi.size+=r.size;bi.usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VkBuffer buffer{};check(GPU(vkCreateBuffer)(d.device,&bi,nullptr,&buffer));resources.buffer=buffer;if(!buffer)throw std::runtime_error("Camera readback buffer unavailable");
         VkMemoryRequirements req{};GPU(vkGetBufferMemoryRequirements)(d.device,buffer,&req);VkPhysicalDeviceMemoryProperties props{};reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(d.gipa(d.instance,"vkGetPhysicalDeviceMemoryProperties"))(d.physical,&props);
         uint32_t type=UINT32_MAX;for(uint32_t i=0;i<props.memoryTypeCount;++i)if((req.memoryTypeBits&(1u<<i))&&(props.memoryTypes[i].propertyFlags&(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))==(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)){type=i;break;}if(type==UINT32_MAX)throw std::runtime_error("No coherent readback memory");
-        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;check(GPU(vkAllocateMemory)(d.device,&ai,nullptr,&memory));check(GPU(vkBindBufferMemory)(d.device,buffer,memory,0));
-        VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.queueFamilyIndex=family;check(GPU(vkCreateCommandPool)(d.device,&pi,nullptr,&pool));VkCommandBufferAllocateInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ci.commandPool=pool;ci.commandBufferCount=1;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;check(GPU(vkAllocateCommandBuffers)(d.device,&ci,&command));if(d.setLoaderData)check(d.setLoaderData(d.device,command));
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;
+        VkDeviceMemory memory{};check(GPU(vkAllocateMemory)(d.device,&ai,nullptr,&memory));resources.memory=memory;if(!memory)throw std::runtime_error("Camera readback memory unavailable");check(GPU(vkBindBufferMemory)(d.device,buffer,memory,0));
+        VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pi.queueFamilyIndex=family;
+        VkCommandPool pool{};check(GPU(vkCreateCommandPool)(d.device,&pi,nullptr,&pool));resources.pool=pool;if(!pool)throw std::runtime_error("Camera readback command pool unavailable");
+        VkCommandBufferAllocateInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ci.commandPool=pool;ci.commandBufferCount=1;ci.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        VkCommandBuffer command{};check(GPU(vkAllocateCommandBuffers)(d.device,&ci,&command));if(!command)throw std::runtime_error("Camera readback command unavailable");if(d.setLoaderData)check(d.setLoaderData(d.device,command));
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;check(GPU(vkBeginCommandBuffer)(command,&begin));VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;GPU(vkCmdPipelineBarrier)(command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&barrier,0,nullptr,0,nullptr);
         VkDeviceSize cursor=0;for(const auto& r:requests){VkBufferCopy copy{r.offset,cursor,r.size};GPU(vkCmdCopyBuffer)(command,r.buffer,buffer,1,&copy);cursor+=r.size;}
-        barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;GPU(vkCmdPipelineBarrier)(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);check(GPU(vkEndCommandBuffer)(command));VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};check(GPU(vkCreateFence)(d.device,&fi,nullptr,&fence));VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&command;check(GPU(vkQueueSubmit)(queue,1,&si,fence));submitted=true;check(GPU(vkWaitForFences)(d.device,1,&fence,VK_TRUE,UINT64_MAX));submitted=false;
-        void* mapped{};check(GPU(vkMapMemory)(d.device,memory,0,bi.size,0,&mapped));std::vector<unsigned char> values(size_t(bi.size));std::memcpy(values.data(),mapped,size_t(bi.size));GPU(vkUnmapMemory)(d.device,memory);
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;GPU(vkCmdPipelineBarrier)(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);check(GPU(vkEndCommandBuffer)(command));
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};VkFence fence{};check(GPU(vkCreateFence)(d.device,&fi,nullptr,&fence));resources.fence=fence;if(!fence)throw std::runtime_error("Camera readback fence unavailable");
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};si.commandBufferCount=1;si.pCommandBuffers=&command;check(GPU(vkQueueSubmit)(queue,1,&si,fence));resources.submitted=true;check(GPU(vkWaitForFences)(d.device,1,&fence,VK_TRUE,UINT64_MAX));resources.submitted=false;
+        void* mapped{};check(GPU(vkMapMemory)(d.device,memory,0,bi.size,0,&mapped));resources.mapped=mapped;if(!mapped)throw std::runtime_error("Camera readback mapping unavailable");
+        std::vector<unsigned char> values(size_t(bi.size));std::memcpy(values.data(),mapped,size_t(bi.size));resources.unmap(d.device,memory);resources.mapped=nullptr;
         cursor=0;for(const auto& r:requests){
-         if(!r.output.empty()){std::ofstream out(r.output,std::ios::binary);out.write(reinterpret_cast<const char*>(values.data()+size_t(cursor)),std::streamsize(r.size));if(!out)throw std::runtime_error("Cannot write decal GPU buffer");log("DECAL_GPU_BUFFER "+r.output.string()+" bytes="+std::to_string(r.size));}
+         if(!r.output.empty()){std::ofstream out(r.output,std::ios::binary);out.write(reinterpret_cast<const char*>(values.data()+size_t(cursor)),std::streamsize(r.size));if(!out)throw std::runtime_error("Cannot write decal GPU buffer");try{log("DECAL_GPU_BUFFER "+r.output.string()+" bytes="+std::to_string(r.size));}catch(...){}}
          else {std::ofstream out(captureRoot()/"camera-gpu.tsv",std::ios::app);out<<std::setprecision(9)<<trace::currentFrame()<<'\t'<<trace::id(r.pipeline)<<'\t'<<r.binding<<'\t'<<r.index;float floats[16];std::memcpy(floats,values.data()+size_t(cursor),64);for(auto f:floats)out<<'\t'<<f;out<<'\n';}
          cursor+=r.size;
         }
-        log("CAMERA_GPU_READBACK buffers="+std::to_string(requests.size())+" frame="+std::to_string(trace::currentFrame()));cleanup();
-    }catch(const std::exception& e){log(e.what());cleanup();}
+        log("CAMERA_GPU_READBACK buffers="+std::to_string(requests.size())+" frame="+std::to_string(trace::currentFrame()));
+    }catch(const std::exception& e){try{log(e.what());}catch(...){}}
+    catch(...){try{log("Camera GPU readback failed");}catch(...){}}
 #undef GPU
 }
 }

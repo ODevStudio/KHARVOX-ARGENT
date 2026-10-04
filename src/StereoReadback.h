@@ -1,5 +1,6 @@
 #pragma once
 #include "QuadRuntime.h"
+#include "vulkan/GpuRetirement.h"
 #include <fstream>
 #include <stdexcept>
 namespace argent {
@@ -12,7 +13,7 @@ inline void readbackStereo(Device& d,VkImage image,VkExtent2D extent,VkFormat fo
  struct Resources {
   Device& d;VkBuffer buffer{};VkDeviceMemory memory{};VkCommandPool pool{};VkFence fence{};void* mapped{};bool submitted{};
   ~Resources(){
-   if(submitted)d.proc<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(d.graphicsQueue);
+   if(submitted)requireGpuRetirement(d.proc<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(d.graphicsQueue),"eye readback");
    if(mapped)d.proc<PFN_vkUnmapMemory>("vkUnmapMemory")(d.device,memory);
    if(fence)d.proc<PFN_vkDestroyFence>("vkDestroyFence")(d.device,fence,nullptr);
    if(pool)d.proc<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(d.device,pool,nullptr);
