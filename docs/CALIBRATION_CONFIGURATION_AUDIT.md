@@ -1,6 +1,6 @@
 # Calibration Configuration and Persistence Audit
 
-Reviewed 2026-10-04. All changes remain local; no game installation was changed.
+Reviewed 2026-10-04. Changes are published to the ODevStudio fork; no game installation was changed.
 
 | Commit | Subsystem | Category | Change |
 | --- | --- | --- | --- |
