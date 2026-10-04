@@ -3,6 +3,7 @@
 #include "EyeProjection.h"
 #include "../EternalDlssAbi.h"
 #include <unordered_set>
+#include <mutex>
 namespace argent::sfs {
 // Explicit Eternal classification; no inherited DOOM hashes or scale.
 struct Configuration {std::unordered_set<uint64_t> projectionShaders,stereoComputeShaders,broadcastComputeShaders,screenUiShaders; bool imageComputeStereo{},projectDepthOnly{},eternalVolumes{},eternalLightGrids{},eternalVk3d{};};
@@ -10,13 +11,13 @@ struct FramePose {uint64_t serial{};XrTime displayTime{};std::array<XrView,2> vi
 struct EyeImage {VkImage image{};VkExtent2D extent{};VkFormat format{};VkImageLayout layout{};XrPosef pose{};XrFovf fov{};uint32_t layer{};uint64_t serial{};};
 struct StereoFrame {FramePose pose;uint64_t generation{};std::array<EyeImage,2> eyes;};
 bool sourceRingRequested();
-bool configureSourceRing(VkDevice,PFN_vkGetDeviceProcAddr,const VkPhysicalDeviceMemoryProperties&,VkQueue,void(*)(),void(*)());
+bool configureSourceRing(VkDevice,PFN_vkGetDeviceProcAddr,const VkPhysicalDeviceMemoryProperties&,VkQueue,std::recursive_mutex*);
 bool sourceRingActive(VkDevice);
 bool sourceSwapchain(VkDevice,VkSwapchainKHR);
 VkResult createSourceSwapchain(VkDevice,const VkSwapchainCreateInfoKHR&,VkSwapchainKHR*);
 VkResult sourceImages(VkDevice,VkSwapchainKHR,uint32_t*,VkImage*);
 VkResult acquireSource(VkDevice,VkSwapchainKHR,uint64_t,VkSemaphore,VkFence,uint32_t*);
-VkResult presentSource(VkDevice,VkQueue,const VkPresentInfoKHR&,bool);
+VkResult presentSource(VkDevice,VkQueue,const VkPresentInfoKHR&,bool,bool sourceComplete=false);
 void destroySourceSwapchain(VkDevice,VkSwapchainKHR);
 VkImageLayout sourceLayout(VkDevice,VkImage,VkImageLayout);
 bool nativeProbeEnabled();

@@ -58,7 +58,7 @@ int main(){try{
     input.imageType=VK_IMAGE_TYPE_2D;input.format=VK_FORMAT_D32_SFLOAT;
     input.extent={8,8,1};input.mipLevels=1;input.arrayLayers=1;input.samples=VK_SAMPLE_COUNT_1_BIT;
     input.usage=VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    VkImage image{};ok(registry.create(device,input,nullptr,&image,vkCreateImage));
+    VkImage image{};ok(registry.create(device,input,nullptr,&image,vkCreateImage,vkDestroyImage));
     VkMemoryRequirements req{};vkGetImageMemoryRequirements(device,image,&req);
     VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=req.size;
     alloc.memoryTypeIndex=memoryType(req.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
