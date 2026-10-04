@@ -2,20 +2,28 @@
 #include <cassert>
 #include <cstring>
 #include <iostream>
+#include <set>
 namespace argent {void log(const std::string&) {}}
 static VkFormat createdFormat{};static uint64_t nextHandle=10;static uint32_t nextImage{};static VkResult acquireResult=VK_SUCCESS,fenceStatus=VK_SUCCESS;
 static unsigned submits{},presents{},waits{},acquires{},resets{};static VkSemaphore signal{},presentWait{};static bool idle{};
 static bool scaled{},emptyTest{},finalEyeTest{};static unsigned eyeTransitions{};static unsigned blits{},clears{};static VkExtent2D createdExtent{};
-static VKAPI_ATTR VkResult VKAPI_CALL createChain(VkDevice,const VkSwapchainCreateInfoKHR* info,const VkAllocationCallbacks*,VkSwapchainKHR* out){createdFormat=info->imageFormat;createdExtent=info->imageExtent;*out=VkSwapchainKHR(nextHandle++);return VK_SUCCESS;}
+static std::set<uintptr_t> liveHandles;
+static bool failPool{},failFence{};
+static VkResult recordResult=VK_SUCCESS,submitResult=VK_SUCCESS,presentResult=VK_SUCCESS,waitResult=VK_SUCCESS;
+static VkResult idleResult=VK_SUCCESS;
+static unsigned queueRetirements{};
+template<class T> static T newHandle(){const auto value=nextHandle++;assert(liveHandles.insert(value).second);return reinterpret_cast<T>(value);}
+template<class T> static void retireHandle(T value){assert(idle&&liveHandles.erase(reinterpret_cast<uintptr_t>(value))==1);}
+static VKAPI_ATTR VkResult VKAPI_CALL createChain(VkDevice,const VkSwapchainCreateInfoKHR* info,const VkAllocationCallbacks*,VkSwapchainKHR* out){createdFormat=info->imageFormat;createdExtent=info->imageExtent;*out=newHandle<VkSwapchainKHR>();return VK_SUCCESS;}
 static VKAPI_ATTR VkResult VKAPI_CALL images(VkDevice,VkSwapchainKHR,uint32_t* n,VkImage* out){if(out)for(unsigned i=0;i<*n;++i)out[i]=VkImage(100+i);else *n=3;return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL createPool(VkDevice,const VkCommandPoolCreateInfo*,const VkAllocationCallbacks*,VkCommandPool* out){*out=VkCommandPool(nextHandle++);return VK_SUCCESS;}
+static VKAPI_ATTR VkResult VKAPI_CALL createPool(VkDevice,const VkCommandPoolCreateInfo*,const VkAllocationCallbacks*,VkCommandPool* out){if(failPool)return VK_ERROR_OUT_OF_DEVICE_MEMORY;*out=newHandle<VkCommandPool>();return VK_SUCCESS;}
 static VKAPI_ATTR VkResult VKAPI_CALL allocate(VkDevice,const VkCommandBufferAllocateInfo*,VkCommandBuffer* out){*out=VkCommandBuffer(30);return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL createSem(VkDevice,const VkSemaphoreCreateInfo*,const VkAllocationCallbacks*,VkSemaphore* out){*out=VkSemaphore(nextHandle++);return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL createFence(VkDevice,const VkFenceCreateInfo*,const VkAllocationCallbacks*,VkFence* out){*out=VkFence(nextHandle++);return VK_SUCCESS;}
+static VKAPI_ATTR VkResult VKAPI_CALL createSem(VkDevice,const VkSemaphoreCreateInfo*,const VkAllocationCallbacks*,VkSemaphore* out){*out=newHandle<VkSemaphore>();return VK_SUCCESS;}
+static VKAPI_ATTR VkResult VKAPI_CALL createFence(VkDevice,const VkFenceCreateInfo*,const VkAllocationCallbacks*,VkFence* out){if(failFence)return VK_ERROR_OUT_OF_DEVICE_MEMORY;*out=newHandle<VkFence>();return VK_SUCCESS;}
 static VKAPI_ATTR VkResult VKAPI_CALL acquire(VkDevice,VkSwapchainKHR,uint64_t timeout,VkSemaphore sem,VkFence,uint32_t* index){++acquires;assert(timeout==0&&sem);*index=nextImage;return acquireResult;}
 static VKAPI_ATTR VkResult VKAPI_CALL status(VkDevice,VkFence){return fenceStatus;}
 static VKAPI_ATTR VkResult VKAPI_CALL resetFence(VkDevice,uint32_t,const VkFence*){++resets;return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL resetCommand(VkCommandBuffer,VkCommandBufferResetFlags){return VK_SUCCESS;}
+static VKAPI_ATTR VkResult VKAPI_CALL resetCommand(VkCommandBuffer,VkCommandBufferResetFlags){return recordResult;}
 static VKAPI_ATTR VkResult VKAPI_CALL begin(VkCommandBuffer,const VkCommandBufferBeginInfo*){return VK_SUCCESS;}
 static VKAPI_ATTR VkResult VKAPI_CALL end(VkCommandBuffer){return VK_SUCCESS;}
 static VKAPI_ATTR void VKAPI_CALL barrier(VkCommandBuffer,VkPipelineStageFlags,VkPipelineStageFlags,VkDependencyFlags,uint32_t,const VkMemoryBarrier*,uint32_t,const VkBufferMemoryBarrier*,uint32_t count,const VkImageMemoryBarrier* images){
@@ -30,14 +38,15 @@ static VKAPI_ATTR void VKAPI_CALL clear(VkCommandBuffer,VkImage image,VkImageLay
  assert(value->float32[0]==0&&value->float32[1]==0&&value->float32[2]==0&&value->float32[3]==1);++clears;
 }
 static VKAPI_ATTR void VKAPI_CALL copy(VkCommandBuffer,VkImage,VkImageLayout,VkImage,VkImageLayout,uint32_t n,const VkImageCopy* c){assert(n==1&&c->srcSubresource.layerCount==1&&c->extent.width==800);}
-static VKAPI_ATTR VkResult VKAPI_CALL submit(VkQueue,uint32_t n,const VkSubmitInfo* s,VkFence f){++submits;assert(n==1&&f&&s->waitSemaphoreCount==1&&s->signalSemaphoreCount==1);signal=*s->pSignalSemaphores;return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL present(VkQueue,const VkPresentInfoKHR* p){++presents;assert(p->waitSemaphoreCount==1);presentWait=*p->pWaitSemaphores;assert(presentWait==signal);return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL wait(VkDevice,uint32_t,const VkFence*,VkBool32,uint64_t){++waits;return VK_SUCCESS;}
-static VKAPI_ATTR VkResult VKAPI_CALL deviceIdle(VkDevice){idle=true;return VK_SUCCESS;}
-static VKAPI_ATTR void VKAPI_CALL destroyFence(VkDevice,VkFence,const VkAllocationCallbacks*){assert(idle);}
-static VKAPI_ATTR void VKAPI_CALL destroySem(VkDevice,VkSemaphore,const VkAllocationCallbacks*){assert(idle);}
-static VKAPI_ATTR void VKAPI_CALL destroyPool(VkDevice,VkCommandPool,const VkAllocationCallbacks*){assert(idle);}
-static VKAPI_ATTR void VKAPI_CALL destroyChain(VkDevice,VkSwapchainKHR,const VkAllocationCallbacks*){assert(idle);}
+static VKAPI_ATTR VkResult VKAPI_CALL submit(VkQueue,uint32_t n,const VkSubmitInfo* s,VkFence f){++submits;assert(n==1&&f&&s->waitSemaphoreCount==1&&s->signalSemaphoreCount==1);signal=*s->pSignalSemaphores;return submitResult;}
+static VKAPI_ATTR VkResult VKAPI_CALL present(VkQueue,const VkPresentInfoKHR* p){++presents;assert(p->waitSemaphoreCount==1);presentWait=*p->pWaitSemaphores;assert(presentWait==signal);return presentResult;}
+static VKAPI_ATTR VkResult VKAPI_CALL wait(VkDevice,uint32_t,const VkFence*,VkBool32,uint64_t){++waits;return waitResult;}
+static VKAPI_ATTR VkResult VKAPI_CALL deviceIdle(VkDevice){idle=idleResult==VK_SUCCESS||idleResult==VK_ERROR_DEVICE_LOST;return idleResult;}
+static VKAPI_ATTR VkResult VKAPI_CALL queueIdle(VkQueue){++queueRetirements;return VK_SUCCESS;}
+static VKAPI_ATTR void VKAPI_CALL destroyFence(VkDevice,VkFence value,const VkAllocationCallbacks*){retireHandle(value);}
+static VKAPI_ATTR void VKAPI_CALL destroySem(VkDevice,VkSemaphore value,const VkAllocationCallbacks*){retireHandle(value);}
+static VKAPI_ATTR void VKAPI_CALL destroyPool(VkDevice,VkCommandPool value,const VkAllocationCallbacks*){retireHandle(value);}
+static VKAPI_ATTR void VKAPI_CALL destroyChain(VkDevice,VkSwapchainKHR value,const VkAllocationCallbacks*){retireHandle(value);}
 static VKAPI_ATTR VkResult VKAPI_CALL caps(VkPhysicalDevice,VkSurfaceKHR,VkSurfaceCapabilitiesKHR* out){out->currentExtent=emptyTest?VkExtent2D{1280,720}:VkExtent2D{800,600};return VK_SUCCESS;}
 static VKAPI_ATTR void VKAPI_CALL blit(VkCommandBuffer,VkImage,VkImageLayout,VkImage,VkImageLayout,uint32_t n,const VkImageBlit* b,VkFilter){
  assert(n==1&&b->srcOffsets[1].x==2496&&b->srcOffsets[1].y==2688&&b->dstOffsets[0].x==121&&b->dstOffsets[0].y==0&&b->dstOffsets[1].x==678&&b->dstOffsets[1].y==600);++blits;
@@ -48,6 +57,7 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL proc(VkDevice,const char* name){
 #define MAP(api, fn) if(!std::strcmp(name,#api))return reinterpret_cast<PFN_vkVoidFunction>(fn)
  MAP(vkCmdBlitImage,blit);
  MAP(vkCmdClearColorImage,clear);
+ MAP(vkQueueWaitIdle,queueIdle);
  MAP(vkCreateSwapchainKHR,createChain);MAP(vkGetSwapchainImagesKHR,images);MAP(vkCreateCommandPool,createPool);MAP(vkAllocateCommandBuffers,allocate);MAP(vkCreateSemaphore,createSem);MAP(vkCreateFence,createFence);MAP(vkAcquireNextImageKHR,acquire);MAP(vkGetFenceStatus,status);MAP(vkResetFences,resetFence);MAP(vkResetCommandBuffer,resetCommand);MAP(vkBeginCommandBuffer,begin);MAP(vkEndCommandBuffer,end);MAP(vkCmdPipelineBarrier,barrier);MAP(vkCmdCopyImage,copy);MAP(vkQueueSubmit,submit);MAP(vkQueuePresentKHR,present);MAP(vkWaitForFences,wait);MAP(vkDeviceWaitIdle,deviceIdle);MAP(vkDestroyFence,destroyFence);MAP(vkDestroySemaphore,destroySem);MAP(vkDestroyCommandPool,destroyPool);MAP(vkDestroySwapchainKHR,destroyChain);
 #undef MAP
  assert(false);return nullptr;
@@ -102,5 +112,35 @@ int main(){
  assert(clears==beforeClears+1&&blits==beforeBlits&&waits==beforeWaits);mirror.destroy(d);
  assert(mirror.create(d,info,60,false));assert(mirror.needsFrame());mirror.present(d,VkImage(4),d.graphicsQueue,start);
  assert(clears==beforeClears+2&&!mirror.needsFrame());mirror.destroy(d);
- std::cout<<"Mirror: lifetime, independent extents, cadence and one-shot blank 720p output without eye reads verified\n";
+ emptyTest=scaled=false;info.imageExtent={800,600};info.imageFormat=VK_FORMAT_UNDEFINED;
+ for(auto* failure:{&failPool,&failFence}){
+  *failure=true;bool rejected=false;
+  try{mirror.create(d,info,0,true);}catch(const std::exception&){rejected=true;}
+  assert(rejected);mirror.destroy(d);mirror.destroy(d);assert(liveHandles.empty());*failure=false;
+ }
+ for(auto* failure:{&acquireResult,&fenceStatus,&recordResult,&submitResult,&waitResult,&presentResult}){
+  assert(mirror.create(d,info,0,true));
+  if(failure==&fenceStatus)mirror.present(d,VkImage(4),d.graphicsQueue);
+  *failure=VK_ERROR_DEVICE_LOST;bool rejected=false;
+  const auto beforeRetirements=queueRetirements;
+  try{mirror.present(d,VkImage(4),d.graphicsQueue,start,{},VK_IMAGE_LAYOUT_GENERAL,true);}catch(const std::exception&){rejected=true;}
+  assert(rejected&&!mirror.needsFrame());
+  if(failure==&waitResult||failure==&presentResult||failure==&fenceStatus)assert(queueRetirements==beforeRetirements+1);
+  const auto failedAcquires=acquires,failedSubmits=submits,failedPresents=presents;
+  *failure=VK_SUCCESS;
+  mirror.present(d,VkImage(4),d.graphicsQueue);assert(acquires==failedAcquires&&submits==failedSubmits&&presents==failedPresents);
+  mirror.destroy(d);assert(liveHandles.empty());
+ }
+ assert(mirror.create(d,info,0,true));acquireResult=VK_NOT_READY;mirror.present(d,VkImage(4),d.graphicsQueue);assert(mirror.needsFrame());
+ acquireResult=VK_SUBOPTIMAL_KHR;presentResult=VK_SUBOPTIMAL_KHR;mirror.present(d,VkImage(4),d.graphicsQueue);assert(mirror.needsFrame());
+ acquireResult=presentResult=VK_SUCCESS;mirror.destroy(d);assert(liveHandles.empty());
+ for(auto* failure:{&acquireResult,&presentResult}){
+  assert(mirror.create(d,info,0,true));*failure=VK_ERROR_OUT_OF_DATE_KHR;bool rejected=false;
+  try{mirror.present(d,VkImage(4),d.graphicsQueue);}catch(const std::exception&){rejected=true;}
+  assert(rejected&&!mirror.needsFrame());*failure=VK_SUCCESS;mirror.destroy(d);assert(liveHandles.empty());
+ }
+ assert(mirror.create(d,info,0,true));idleResult=VK_ERROR_OUT_OF_HOST_MEMORY;bool retained=false;
+ try{mirror.destroy(d);}catch(const std::exception&){retained=true;}
+ assert(retained&&mirror.handle()&&!liveHandles.empty());idleResult=VK_ERROR_DEVICE_LOST;mirror.destroy(d);assert(liveHandles.empty());idleResult=VK_SUCCESS;
+ std::cout<<"Mirror: lifetime, partial-creation cleanup, terminal-error isolation, independent extents, cadence and one-shot blank output verified\n";
 }
