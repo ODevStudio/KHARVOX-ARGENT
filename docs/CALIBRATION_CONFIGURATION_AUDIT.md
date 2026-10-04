@@ -7,6 +7,7 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `31b6122` | Weapon configuration publication | Stability | Reject missing string values and interrupted input before replacing the previous settings. |
 | `486f435` | Support and weapon calibration persistence | Stability | Publish support presets only after successful replacement; reject unavailable paths and check final stream state after close. |
 | `9ae6579` | Weapon configuration stream state | Stability | Reject already-exhausted input instead of publishing defaults. |
+| `936dc41` | Controller configuration and support reload | Stability | Require complete native reads, replace support snapshots and isolate diagnostic failures after complete state publication. |
 
 ## Configuration Publication
 
@@ -45,11 +46,47 @@ Failures preserve both committed map contents and destination bytes; unrelated
 profiles survive a successful save. Relative-path checks run in an isolated
 temporary directory. Close-only I/O failure is not fault-injected.
 
+## Native File Reload and Diagnostic Boundaries
+
+The unchanged production refresh method fails eight of thirteen scenarios:
+replaced/empty/deleted support files leave stale presets, malformed or invalid
+rows publish an earlier valid prefix, and throwing diagnostics interrupt accepted
+or rejected configuration updates. The method is now included from
+`XrConfiguration.inc` in both the real controller and the existing calibration
+fixture, which uses the actual mapping, gesture, smoothing and support types.
+
+Configuration reads use checked Windows `CreateFileW`/`ReadFile` calls with a
+standard scope-owned handle. A native read error is distinct from successful EOF
+and leaves the output string unchanged, including after a complete valid prefix.
+Readers permit file replacement but refuse an active writer, so an in-progress
+direct edit cannot expose a valid partial configuration. Successful complete
+support input replaces the full map; empty or deleted files remove overrides.
+Other open/read failures and invalid support content retain the previous map.
+
+Accepted controls publish settings, reset transient input state and publish the
+complete presentation bit mask before caching the observed text and attempting
+diagnostics. Invalid controls leave that state unchanged; caching their complete
+text retains the existing rejection-log suppression. Optional refresh failures
+cannot escape into the outer controller update handler and clear live input.
+The existing one-second polling cadence is unchanged; no GPU wait or FPS gain
+is added or claimed.
+
+Twenty final cases pass: eighteen production-refresh scenarios and two direct
+native-reader checks. They cover support replacement/removal, invalid prefixes,
+missing/locked paths, accepted/rejected throwing logs, both cinematic bit modes,
+unchanged settings and CRLF bytes, throttling, controls/support read faults after
+an initial read, and a native active writer. Direct checks verify multi-buffer
+byte-exact reads, prefix-error rejection and closed handles. The first adapted
+fixture incorrectly compared LF cache bytes with text-mode-written CRLF files;
+binary fixture writes repair that mismatch without changing production behavior.
+Actual disk/controller/headset failures and host-allocation injection remain
+outside these checks.
+
 ## Verification Limits
 
-All eleven configuration boundaries and six support persistence cases pass.
-The final three-check focused run passes in 0.10 seconds; all 123 harness checks
-pass in 105.97 seconds after rebuilding affected production and test targets.
+All eleven configuration boundaries, six support persistence and twenty reload
+cases pass. The final five-check focused run passes in 0.19 seconds; all 123
+harness checks pass in 107.17 seconds after rebuilding production and test targets.
 Full raw diffs and relevant unfiltered diagnostics were inspected. Existing build
 warnings concern debug/assertion definitions and macro redefinitions.
 
@@ -58,9 +95,11 @@ The existing calibration test calls the same helper used by production capture.
 `XrActionLifecycle.inc`, not full action polling; it does not prove this capture
 or configuration refresh through a native XR session.
 
-The actual file refresh still uses `istreambuf_iterator`, loads support rows
-directly into the live map and has unguarded diagnostics. Complete file-I/O
-failure, reload/removal semantics and native polling remain to inspect.
+The configuration fixture now exercises the same production refresh method and
+real temporary files, with controlled native read faults and optional logging.
+It does not include the complete controller action update or execute a native
+OpenXR session. Remaining action polling and other diagnostic boundaries still
+need verification.
 Hand-renderer close-result handling and launcher INI flush-result handling also
 remain pending. The existing 994-line hand renderer was not broadly restructured
 for this bounded configuration/support change. Native game/headset, package and
