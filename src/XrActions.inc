@@ -177,11 +177,7 @@ struct ControllerActions {
     if(capture&&!captureDown&&controls.grip[off]&&sample.gripValid[off]){
      auto v=input::rotate(input::inverse(sample.weapon.orientation),input::sub(sample.grip[off].position,sample.weapon.position));
      if(input::length(v)>=.08f&&input::length(v)<=1.2f){
-      auto saved=configPath();saved+=L".support";auto temporary=saved;temporary+=L".tmp";
-      supportProfiles[activeProfile]=v;
-      std::ofstream out(temporary);for(const auto& row:supportProfiles)out<<row.first<<' '<<row.second.x<<' '<<row.second.y<<' '<<row.second.z<<'\n';
-      out.flush();const bool written=bool(out);out.close();
-      if(written&&MoveFileExW(temporary.c_str(),saved.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){calibration.support=v;log("XR_TWO_HAND support captured profile="+activeProfile);}else log("XR_TWO_HAND capture save failed");
+      if(input::saveSupportCalibration(configPath(),activeProfile,v,supportProfiles)){calibration.support=v;log("XR_TWO_HAND support captured profile="+activeProfile);}else log("XR_TWO_HAND capture save failed");
      }
     }
     captureDown=capture;

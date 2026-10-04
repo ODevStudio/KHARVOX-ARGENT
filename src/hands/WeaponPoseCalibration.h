@@ -38,7 +38,7 @@ public:
   const auto target=root/L"weapon_pose_calibration_saved.cfg",temporary=root/L"weapon_pose_calibration_saved.tmp";
   std::ofstream out(temporary);out<<std::fixed<<std::setprecision(6);
   for(const auto& [name,d]:committed)out<<name<<' '<<d.position.x<<' '<<d.position.y<<' '<<d.position.z<<' '<<d.degrees.x<<' '<<d.degrees.y<<' '<<d.degrees.z<<'\n';
-  out.flush();const bool ok=bool(out);out.close();return ok&&MoveFileExW(temporary.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+  out.flush();out.close();return bool(out)&&MoveFileExW(temporary.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
  }
  bool save(){return draft.apply([&](const auto& candidate){return saveValues(candidate);});}
  void configure(const std::string& profile,bool left,bool enabled,const calibration::ApplyCommand& command){

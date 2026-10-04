@@ -1,4 +1,5 @@
 #include "../src/hands/WeaponPoseCalibration.h"
+#include "../src/openxr/SupportCalibration.h"
 #include "../src/weapon/EternalHapticsWeapon.h"
 #include "../src/WeaponAttachmentCalibration.h"
 #include "../src/WeaponIdlePose.h"
@@ -11,6 +12,39 @@ public:
  explicit FailedConfigurationBuffer(std::string value):text(std::move(value)){setg(text.data(),text.data(),text.data()+text.size());}
  int_type underflow()override{throw std::ios_base::failure("Configuration read failure");}
 };
+void checkSupportPersistence(const std::filesystem::path& root){
+ using namespace argent::input;
+ const auto folder=root/L"support";std::filesystem::create_directories(folder);
+ const auto config=folder/L"argent_controls.cfg";auto saved=config;saved+=L".support";auto temporary=saved;temporary+=L".tmp";
+ std::map<std::string,XrVector3f> profiles{{"ballista",{0,0,-.4f}},{"rocket_launcher",{0,0,-.6f}}};
+ const auto equal=[](const auto& a,const auto& b){
+  if(a.size()!=b.size())return false;
+  for(const auto& [key,v]:a){auto it=b.find(key);if(it==b.end()||v.x!=it->second.x||v.y!=it->second.y||v.z!=it->second.z)return false;}
+  return true;
+ };
+ const auto contents=[&](){std::ifstream in(saved);return std::string(std::istreambuf_iterator<char>(in),{});};
+ unsigned cases{},failures{};
+ const auto expect=[&](bool passed,const char* name){++cases;if(!passed){++failures;std::cerr<<name<<": support persistence failed\n";}};
+ expect(saveSupportCalibration(config,"ballista",{.1f,0,-.5f},profiles)&&profiles.at("ballista").x==.1f&&profiles.at("rocket_launcher").z==-.6f,"initial save");
+ const auto committed=contents();
+ const auto locked=CreateFileW(saved.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+ check(locked!=INVALID_HANDLE_VALUE,"Support target lock failed");
+ auto replacement=profiles;const bool replaced=saveSupportCalibration(config,"ballista",{.2f,0,-.5f},replacement);CloseHandle(locked);
+ expect(!replaced&&equal(replacement,profiles)&&contents()==committed,"replacement failure");
+ std::filesystem::remove(temporary);std::filesystem::create_directory(temporary);
+ auto unwritable=profiles;const bool written=saveSupportCalibration(config,"combat_shotgun",{.2f,0,-.5f},unwritable);
+ expect(!written&&equal(unwritable,profiles)&&contents()==committed,"temporary open failure");
+ std::filesystem::remove(temporary);
+ const auto previousDirectory=std::filesystem::current_path();std::filesystem::current_path(folder);
+ auto unavailable=profiles;const bool relative=saveSupportCalibration({},"ballista",{.2f,0,-.5f},unavailable);
+ const bool noRelativeFiles=!std::filesystem::exists(L".support")&&!std::filesystem::exists(L".support.tmp");std::filesystem::current_path(previousDirectory);
+ expect(!relative&&equal(unavailable,profiles)&&noRelativeFiles,"unavailable configuration path");
+ expect(saveSupportCalibration(config,"ballista",{.2f,0,-.5f},profiles)&&profiles.at("ballista").x==.2f&&!std::filesystem::exists(temporary),"successful retry");
+ std::ifstream in(saved);std::map<std::string,XrVector3f> disk;std::string name;XrVector3f value{};
+ while(in>>name>>value.x>>value.y>>value.z)disk[name]=value;
+ expect(in.eof()&&equal(disk,profiles),"complete round trip");
+ std::cout<<cases<<" support persistence scenarios, "<<failures<<" failures\n";check(!failures,"Support persistence boundaries failed");
+}
 int main(){try{
  using namespace argent::input;
  {
@@ -58,6 +92,7 @@ int main(){try{
   check(std::string(argent::eternalCalibrationProfile(KharvoxWeaponKind::Unknown,true))=="crucible","Crucible profile detection failed");
  }
  const auto root=std::filesystem::temp_directory_path()/("ArgentWeaponCalibration-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));std::filesystem::create_directories(root);
+ checkSupportPersistence(root);
  WeaponPoseCalibration editor;editor.load(root);
  {
   const auto folder=root/L"defaults";std::filesystem::create_directories(folder);
