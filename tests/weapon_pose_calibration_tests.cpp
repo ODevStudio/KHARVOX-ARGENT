@@ -154,7 +154,7 @@ int main(){try{
   if(readWeaponConfig(stream,candidate)||candidate.profile!=config.profile||candidate.calibrationMode!=config.calibrationMode||candidate.leftHanded!=config.leftHanded){++configFailures;std::cerr<<name<<": invalid configuration published\n";}
  };
  for(const auto text:{"calibration_mode", "calibration_apply_profile", "calibration_apply_mode", "profile"}){std::istringstream row(text);reject(row,text);}
- for(const auto state:{std::ios::badbit,std::ios::failbit}){std::istringstream rows("dominant left\n");rows.setstate(state);reject(rows,state==std::ios::badbit?"bad stream":"failed stream");}
+ for(const auto& [name,state]:{std::pair{"bad stream",std::ios::badbit},std::pair{"failed stream",std::ios::failbit},std::pair{"exhausted stream",std::ios::eofbit},std::pair{"failed exhausted stream",std::ios::iostate(std::ios::failbit|std::ios::eofbit)}}){std::istringstream rows("dominant left\n");rows.setstate(state);reject(rows,name);}
  FailedConfigurationBuffer failedBuffer("dominant left\n");std::istream failedInput(&failedBuffer);reject(failedInput,"failure after complete row");
  std::istringstream empty("");WeaponConfig defaults;++configCases;if(!readWeaponConfig(empty,defaults)||defaults.profile!="default")++configFailures;
  std::istringstream lastRow("calibration_mode hands");++configCases;if(!readWeaponConfig(lastRow,defaults)||defaults.calibrationMode!="hands")++configFailures;

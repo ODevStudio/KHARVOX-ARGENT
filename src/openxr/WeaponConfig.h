@@ -28,6 +28,7 @@ struct WeaponConfig {
 };
 inline bool safeCalibration(const PoseCalibration& p){return camera::validPosition(p.offset)&&length(p.offset)<=.5f&&camera::validQuaternion(p.rotation);}
 inline bool readWeaponConfig(std::istream& input,WeaponConfig& output){
+ if(!input.good())return false;
  WeaponConfig next;std::string line;
  while(std::getline(input,line)){if(line.empty()||line[0]=='#')continue;std::istringstream row(line);std::string key;row>>key;
   if(key=="dominant"){std::string value;row>>value;if(value!="left"&&value!="right")return false;next.leftHanded=value=="left";}
