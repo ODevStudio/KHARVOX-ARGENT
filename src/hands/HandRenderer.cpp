@@ -2,7 +2,10 @@
 #include "HandSceneDepthCopy.h"
 #include "HandCalibrationPolicy.h"
 #include "CalibrationDraft.h"
+#include "CalibrationFile.h"
+#include "HandConfigurationFile.h"
 #include "HandDispatch.h"
+#include "HandSceneFramebuffers.h"
 #include "HandHudMaskSpv.h"
 #include "HandHudPlaceholderSpv.h"
 #include <windows.h>
@@ -16,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <exception>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -110,6 +114,7 @@ struct HandRenderer::Impl {
     VkShaderModule hudPlaceholderShader{};
     VkCommandPool uploadPool{};VkCommandBuffer uploadCommand{};VkSampler sampler{};VkDescriptorSetLayout descriptorLayout{};VkDescriptorPool descriptorPool{};VkPipelineLayout pipelineLayout{};VkPipeline pipeline{};VkRenderPass renderPass{};VkShaderModule vertexShader{},fragmentShader{};
     std::vector<ScenePipeline> scenePipelines;std::vector<VkFramebuffer> sceneFramebuffers;
+    HandSceneFramebuffers cachedSceneFramebuffers;
     struct SceneDepth {DepthTarget target;VkExtent2D extent{};VkFormat format{};bool initialized{};};
     std::vector<SceneDepth> sceneDepthCopies;size_t sceneDepthCopiesUsed{};
     std::array<std::vector<VkImageView>,2> eyeViews{};std::array<std::vector<DepthTarget>,2> depthTargets{};std::array<std::vector<VkFramebuffer>,2> framebuffers{};std::array<VkExtent2D,2> extents{};
@@ -131,11 +136,20 @@ struct HandRenderer::Impl {
     }
 
     void say(const std::string&message)const{if(log)log("[HANDS] "+message);}
+    VkResult retireQueue()const{
+        const auto result=vk.queueWaitIdle(queue);
+        if(result!=VK_SUCCESS&&result!=VK_ERROR_DEVICE_LOST){
+            say("queue retirement failed result="+std::to_string(result));
+            RaiseFailFastException(nullptr,nullptr,0);std::terminate();
+        }
+        return result;
+    }
     std::uint32_t memoryType(std::uint32_t bits,VkMemoryPropertyFlags required)const{VkPhysicalDeviceMemoryProperties p{};vk.getPhysicalDeviceMemoryProperties(physical,&p);for(std::uint32_t i=0;i<p.memoryTypeCount;i++)if((bits&(1u<<i))&&(p.memoryTypes[i].propertyFlags&required)==required)return i;return UINT32_MAX;}
     bool buffer(VkDeviceSize size,VkBufferUsageFlags usage,const void*source,VkBuffer&out,VkDeviceMemory&memory){VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=size;bi.usage=usage;bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;if(vk.createBuffer(device,&bi,nullptr,&out)!=VK_SUCCESS)return false;VkMemoryRequirements req{};vk.getBufferMemoryRequirements(device,out,&req);const auto type=memoryType(req.memoryTypeBits,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);if(type==UINT32_MAX){vk.destroyBuffer(device,out,nullptr);out=VK_NULL_HANDLE;return false;}VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.allocationSize=req.size;ai.memoryTypeIndex=type;if(vk.allocateMemory(device,&ai,nullptr,&memory)!=VK_SUCCESS||vk.bindBufferMemory(device,out,memory,0)!=VK_SUCCESS){if(memory)vk.freeMemory(device,memory,nullptr);vk.destroyBuffer(device,out,nullptr);memory=VK_NULL_HANDLE;out=VK_NULL_HANDLE;return false;}void*mapped{};if(vk.mapMemory(device,memory,0,size,0,&mapped)!=VK_SUCCESS){vk.freeMemory(device,memory,nullptr);vk.destroyBuffer(device,out,nullptr);memory=VK_NULL_HANDLE;out=VK_NULL_HANDLE;return false;}std::memcpy(mapped,source,static_cast<size_t>(size));vk.unmapMemory(device,memory);return true;}
     bool texture(const DecodedImage&decoded,Texture&out,bool srgb);
     bool depthTarget(VkExtent2D extent,DepthTarget&out,VkFormat depthFormat=VK_FORMAT_D32_SFLOAT,bool transfer=false);
     void destroyDepth(DepthTarget& target){
+        if(target.view)cachedSceneFramebuffers.retireDepthAfterCompletion(device,vk,target.view);
         if(target.view)vk.destroyImageView(device,target.view,nullptr);
         if(target.image)vk.destroyImage(device,target.image,nullptr);
         if(target.memory)vk.freeMemory(device,target.memory,nullptr);
@@ -156,6 +170,7 @@ struct HandRenderer::Impl {
     const HandCalibration& renderCalibration(bool left,HandModelKind kind,
         HandWeaponKind weapon,bool leftHanded)const;
     void loadCalibrationFile(const wchar_t* filename, bool defaults);
+    void loadPoseCalibrationFile(const wchar_t* filename);
     bool saveCalibration();
     void writeCalibrationStatus(const char*message=nullptr)const;
     void pollCalibration(const HandGameplayState&gameplay);
@@ -178,9 +193,9 @@ bool HandRenderer::Impl::texture(const DecodedImage&decoded,Texture&out,bool srg
     VkMemoryRequirements requirements{};
     if(ok){vk.getImageMemoryRequirements(device,out.image,&requirements);const auto type=memoryType(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);if(type==UINT32_MAX)ok=false;else{VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=requirements.size;allocation.memoryTypeIndex=type;ok=vk.allocateMemory(device,&allocation,nullptr,&out.memory)==VK_SUCCESS&&vk.bindImageMemory(device,out.image,out.memory,0)==VK_SUCCESS;}}
     if(ok){
-        vk.resetCommandBuffer(uploadCommand,0);VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;ok=vk.beginCommandBuffer(uploadCommand,&begin)==VK_SUCCESS;
+        ok=vk.resetCommandBuffer(uploadCommand,0)==VK_SUCCESS;VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;if(ok)ok=vk.beginCommandBuffer(uploadCommand,&begin)==VK_SUCCESS;
         if(ok){VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.image=out.image;barrier.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;barrier.subresourceRange.levelCount=1;barrier.subresourceRange.layerCount=1;vk.cmdPipelineBarrier(uploadCommand,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);VkBufferImageCopy copy{};copy.imageSubresource.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;copy.imageSubresource.layerCount=1;copy.imageExtent={decoded.width,decoded.height,1};vk.cmdCopyBufferToImage(uploadCommand,staging,out.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;vk.cmdPipelineBarrier(uploadCommand,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);ok=vk.endCommandBuffer(uploadCommand)==VK_SUCCESS;}
-        if(ok){VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&uploadCommand;ok=vk.queueSubmit(queue,1,&submit,VK_NULL_HANDLE)==VK_SUCCESS&&vk.queueWaitIdle(queue)==VK_SUCCESS;}
+        if(ok){VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&uploadCommand;ok=vk.queueSubmit(queue,1,&submit,VK_NULL_HANDLE)==VK_SUCCESS&&retireQueue()==VK_SUCCESS;}
     }
     if(staging)vk.destroyBuffer(device,staging,nullptr);if(stagingMemory)vk.freeMemory(device,stagingMemory,nullptr);
     if(ok){VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};vi.image=out.image;vi.viewType=VK_IMAGE_VIEW_TYPE_2D;vi.format=srgb?VK_FORMAT_R8G8B8A8_SRGB:VK_FORMAT_R8G8B8A8_UNORM;vi.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;vi.subresourceRange.levelCount=1;vi.subresourceRange.layerCount=1;ok=vk.createImageView(device,&vi,nullptr,&out.view)==VK_SUCCESS;}
@@ -328,7 +343,9 @@ bool HandRenderer::Impl::createCommonResources(){
         ||!vk.getBufferMemoryRequirements||!vk.bindBufferMemory||!vk.mapMemory
         ||!vk.unmapMemory||!vk.cmdCopyBufferToImage||!vk.createRenderPass
         ||!vk.createGraphicsPipelines||!vk.cmdBeginRenderPass
-        ||!vk.cmdDrawIndexed||!vk.cmdDraw){say("required Vulkan functions unavailable; renderer disabled");return false;}
+        ||!vk.cmdDrawIndexed||!vk.cmdDraw||!vk.resetCommandBuffer
+        ||!vk.beginCommandBuffer||!vk.endCommandBuffer||!vk.queueSubmit
+        ||!vk.queueWaitIdle){say("required Vulkan functions unavailable; renderer disabled");return false;}
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};poolInfo.flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;poolInfo.queueFamilyIndex=queueFamily;if(vk.createCommandPool(device,&poolInfo,nullptr,&uploadPool)!=VK_SUCCESS)return false;
     VkCommandBufferAllocateInfo commandInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};commandInfo.commandPool=uploadPool;commandInfo.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;commandInfo.commandBufferCount=1;if(vk.allocateCommandBuffers(device,&commandInfo,&uploadCommand)!=VK_SUCCESS)return false;
     if(vk.setDeviceLoaderData&&vk.setDeviceLoaderData(device,uploadCommand)!=VK_SUCCESS)return false;
@@ -531,16 +548,7 @@ void HandRenderer::Impl::drawGeometry(VkCommandBuffer commandBuffer,
 
 void HandRenderer::Impl::destroyAsset(Asset&asset){for(auto&texture:asset.textures){if(texture.view)vk.destroyImageView(device,texture.view,nullptr);if(texture.image)vk.destroyImage(device,texture.image,nullptr);if(texture.memory)vk.freeMemory(device,texture.memory,nullptr);}if(asset.indices)vk.destroyBuffer(device,asset.indices,nullptr);if(asset.indexMemory)vk.freeMemory(device,asset.indexMemory,nullptr);if(asset.vertices)vk.destroyBuffer(device,asset.vertices,nullptr);if(asset.vertexMemory)vk.freeMemory(device,asset.vertexMemory,nullptr);asset={};}
 
-const HandCalibration&HandRenderer::Impl::renderCalibration(bool left,
-    HandModelKind kind,HandWeaponKind weapon,bool leftHanded)const{
-    if(auto value=calibrationDraft.find(poseKey(weapon,leftHanded,left)))return *value;
-    if(auto value=calibrationDraft.find(poseKey(HandWeaponKind::Unknown,leftHanded,left)))return *value;
-    const auto selection=selectHandCalibrationProfile(left,leftHanded,weapon,
-        kind==HandModelKind::GunHolding);
-    if(selection.weaponSpecific)
-        return weaponCalibrations[selection.weaponIndex][selection.handIndex];
-    return left?leftCalibration:rightCalibration;
-}
+#include "HandPoseCalibration.inc"
 
 HandCalibration&HandRenderer::Impl::selectedCalibration(){
     const auto initial=renderCalibration(calibrateLeft,HandModelKind::GunHolding,calibrationWeapon,calibrationLeftHanded);
@@ -551,39 +559,7 @@ const HandCalibration&HandRenderer::Impl::selectedCalibration()const{
     return renderCalibration(calibrateLeft,HandModelKind::GunHolding,calibrationWeapon,calibrationLeftHanded);
 }
 
-void HandRenderer::Impl::loadCalibrationFile(const wchar_t* filename, bool defaults){
-    std::ifstream input(root/filename);
-    // Repository defaults are the baseline. A legacy v1 save deliberately
-    // uses its global wrists for every weapon; partial v2 saves override only
-    // their named profiles, preserving all other accepted defaults.
-    auto resetWeaponProfiles=[&]{
-        for(auto&profile:weaponCalibrations){profile[0]=leftCalibration;
-            profile[1]=rightCalibration;}
-    };
-    if(!input){if(defaults){resetWeaponProfiles();say("hand calibration defaults missing; using hand_models.cfg wrists");}return;}
-    std::unordered_map<std::string,std::string>values;std::string line;
-    while(std::getline(input,line)){line=trim(line);if(line.empty()||line[0]=='#')continue;const auto equals=line.find('=');if(equals!=std::string::npos)values[trim(line.substr(0,equals))]=trim(line.substr(equals+1));}
-    auto vector3=[&](const std::string&key,float value[3]){const auto found=values.find(key);if(found==values.end())return false;std::istringstream stream(found->second);float parsed[3]{};if(!(stream>>parsed[0]>>parsed[1]>>parsed[2])||!std::isfinite(parsed[0])||!std::isfinite(parsed[1])||!std::isfinite(parsed[2]))return false;std::copy_n(parsed,3,value);return true;};
-    const bool leftPosition=vector3("left_position",leftCalibration.position);
-    const bool leftRotation=vector3("left_rotation",leftCalibration.rotationDegrees);
-    const bool rightPosition=vector3("right_position",rightCalibration.position);
-    const bool rightRotation=vector3("right_rotation",rightCalibration.rotationDegrees);
-    if(defaults || values["version"] != "2") resetWeaponProfiles();
-    unsigned profileValues{};
-    for(int value=static_cast<int>(HandWeaponKind::CombatShotgun);
-        value<static_cast<int>(HandWeaponKind::Count);++value){
-        const auto weapon=static_cast<HandWeaponKind>(value);
-        const std::string key=HandWeaponKindKey(weapon);
-        auto&profile=weaponCalibrations[static_cast<size_t>(weapon)];
-        profileValues+=vector3(key+"_left_position",profile[0].position)?1u:0u;
-        profileValues+=vector3(key+"_left_rotation",profile[0].rotationDegrees)?1u:0u;
-        profileValues+=vector3(key+"_right_position",profile[1].position)?1u:0u;
-        profileValues+=vector3(key+"_right_rotation",profile[1].rotationDegrees)?1u:0u;
-    }
-    if(leftPosition||leftRotation||rightPosition||rightRotation||profileValues)
-        say(std::string(defaults?"default":"saved")+" hand calibration loaded; per-weapon values="
-            +std::to_string(profileValues));
-}
+#include "HandLegacyCalibration.inc"
 
 void HandRenderer::Impl::writeCalibrationStatus(const char*message)const{
     if(calibrationMode==CalibrationMode::None)return;
@@ -601,18 +577,7 @@ void HandRenderer::Impl::writeCalibrationStatus(const char*message)const{
     if(message&&*message)output<<" | "<<message;
 }
 
-bool HandRenderer::Impl::saveCalibration(){
-    return calibrationDraft.apply([&](const auto& values){
-        const auto target=root/L"hand_pose_calibration_saved.cfg",temporary=root/L"hand_pose_calibration_saved.tmp";
-        std::ofstream out(temporary);out<<std::fixed<<std::setprecision(6);
-        for(const auto& [key,value]:values){out<<key;
-            for(float v:value.position)out<<' '<<v;
-            for(float v:value.rotationDegrees)out<<' '<<v;
-            out<<' '<<value.scale<<'\n';}
-        out.flush();const bool ok=bool(out);out.close();
-        return ok&&MoveFileExW(temporary.c_str(),target.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
-    });
-}
+#include "HandCalibrationSave.inc"
 
 void HandRenderer::Impl::pollCalibration(const HandGameplayState&gameplay){
     if(calibrationMode==CalibrationMode::None)return;
@@ -673,302 +638,6 @@ void HandRenderer::Impl::pollCalibration(const HandGameplayState&gameplay){
     lastCalibrationStep=now;writeCalibrationStatus("preview - press APPLY to save");
 }
 
-HandRenderer::HandRenderer():impl_(new Impl){}
-HandRenderer::~HandRenderer(){shutdown();delete impl_;}
-
-bool HandRenderer::initialize(VkPhysicalDevice physicalDevice,VkDevice device,
-    VkQueue queue,std::uint32_t queueFamily,const KharvoxVulkanDispatch&dispatch,
-    VkFormat colorFormat,const std::array<VkExtent2D,2>&eyeExtents,
-    const std::array<std::vector<VkImage>,2>&eyeImages,
-    const std::wstring&runtimeDirectory,HandLog logger,bool arrayStereo,bool sceneDepthOnly){
-    shutdown();impl_->physical=physicalDevice;impl_->device=device;impl_->queue=queue;impl_->queueFamily=queueFamily;impl_->vk=dispatch;impl_->format=colorFormat;impl_->extents=eyeExtents;impl_->root=runtimeDirectory;impl_->log=std::move(logger);
-    std::unordered_map<std::string,std::string>config;std::ifstream input(impl_->root/L"hand_models.cfg");std::string line;while(std::getline(input,line)){line=trim(line);if(line.empty()||line[0]=='#')continue;const auto equals=line.find('=');if(equals!=std::string::npos)config[trim(line.substr(0,equals))]=trim(line.substr(equals+1));}
-    if(!input&&!std::filesystem::exists(impl_->root/L"hand_models.cfg")){impl_->say("hand_models.cfg missing; static hands disabled");return false;}
-    auto vector3=[&](const char*key,float value[3]){std::istringstream stream(config[key]);return bool(stream>>value[0]>>value[1]>>value[2]);};vector3("left_position",impl_->leftCalibration.position);vector3("left_rotation",impl_->leftCalibration.rotationDegrees);vector3("right_position",impl_->rightCalibration.position);vector3("right_rotation",impl_->rightCalibration.rotationDegrees);try{if(config.count("left_scale"))impl_->leftCalibration.scale=std::clamp(std::stof(config["left_scale"]),.05f,2.f);if(config.count("right_scale"))impl_->rightCalibration.scale=std::clamp(std::stof(config["right_scale"]),.05f,2.f);}catch(...){impl_->say("invalid hand scale; using safe defaults");}impl_->mirrorX[0]=config["left_fist_mirror_x"]=="1";impl_->mirrorX[1]=config["right_fist_mirror_x"]=="1";impl_->mirrorX[2]=config["left_gun_mirror_x"]=="1";impl_->mirrorX[3]=config["right_gun_mirror_x"]=="1";
-    impl_->loadCalibrationFile(L"hand_models_calibration_default.cfg",true);
-    impl_->defaultLeftCalibration=impl_->leftCalibration;impl_->defaultRightCalibration=impl_->rightCalibration;
-    impl_->defaultWeaponCalibrations=impl_->weaponCalibrations;
-    impl_->loadCalibrationFile(L"hand_models_calibration_saved.cfg",false);
-    impl_->calibrationDraft={};
-    for(const auto* filename:{L"hand_pose_calibration_default.cfg",L"hand_pose_calibration_saved.cfg"}){std::ifstream in(impl_->root/filename);std::string key;HandCalibration value;
-     while(in>>key>>value.position[0]>>value.position[1]>>value.position[2]>>value.rotationDegrees[0]>>value.rotationDegrees[1]>>value.rotationDegrees[2]>>value.scale){
-      bool valid=std::isfinite(value.scale)&&value.scale>0;
-      for(float v:value.position)valid=valid&&std::isfinite(v);
-      for(float v:value.rotationDegrees)valid=valid&&std::isfinite(v);
-      if(valid)impl_->calibrationDraft.saved[key]=value;
-     }}
-
-    char calibrationMode[24]{};
-    if(GetEnvironmentVariableA("ARGENT_HAND_CALIBRATION",calibrationMode,sizeof(calibrationMode))>0){
-        if(!_stricmp(calibrationMode,"rotation"))impl_->calibrationMode=CalibrationMode::Rotation;
-        else if(!_stricmp(calibrationMode,"position"))impl_->calibrationMode=CalibrationMode::Position;
-    }
-    if(!impl_->createCommonResources()){impl_->say("Vulkan setup failed; native game rendering continues");shutdown();return false;}
-    const std::array<const char*,4>keys{{"left_fist","right_fist","left_gun","right_gun"}};for(size_t i=0;i<keys.size();i++){const auto found=config.find(keys[i]);if(found==config.end()||found->second.empty()){impl_->say(std::string(keys[i])+" not configured; that hand pose is disabled");continue;}const auto path=impl_->root/std::filesystem::u8path(found->second);if(!std::filesystem::exists(path)){impl_->say(path.filename().u8string()+" missing; model disabled");continue;}impl_->loadAsset(path,impl_->assets[i]);}
-    // One closed beam mesh: no crossed compositor ribbons or orientation singularity.
-    std::vector<Vertex> beamVertices;
-    std::vector<uint32_t> beamIndices;
-    for(unsigned ring=0;ring<2;++ring)for(unsigned i=0;i<8;++i){
-        const float angle=float(i)*6.28318530718f/8.f;
-        Vertex v{};v.position[0]=.002f*std::cos(angle);v.position[1]=.002f*std::sin(angle);
-        v.position[2]=ring?-20.f:0.f;v.normal[0]=std::cos(angle);v.normal[1]=std::sin(angle);
-        v.baseColor[0]=1.f;v.baseColor[1]=.005f;v.baseColor[2]=.002f;v.material[0]=-1.f;
-        beamVertices.push_back(v);
-    }
-    for(uint32_t i=0;i<8;++i){const auto n=(i+1)%8;
-        for(auto v:{i,n,i+8,n,n+8,i+8})beamIndices.push_back(v);
-    }
-    impl_->laserAsset.ready=impl_->buffer(beamVertices.size()*sizeof(Vertex),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        beamVertices.data(),impl_->laserAsset.vertices,impl_->laserAsset.vertexMemory)
-        &&impl_->buffer(beamIndices.size()*sizeof(uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        beamIndices.data(),impl_->laserAsset.indices,impl_->laserAsset.indexMemory);
-    impl_->laserAsset.indexCount=static_cast<uint32_t>(beamIndices.size());
-    for (size_t eye = 0; eye < 2; eye++) {
-      impl_->eyeViews[eye].resize(eyeImages[eye].size());
-      impl_->depthTargets[eye].resize(eyeImages[eye].size());
-      impl_->framebuffers[eye].resize(eyeImages[eye].size());
-      for (size_t index = 0; index < eyeImages[eye].size(); index++) {
-        VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        view.image = eyeImages[eye][index];
-        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        view.format = colorFormat;
-        view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        view.subresourceRange.levelCount = 1;
-        view.subresourceRange.layerCount = 1;
-        view.subresourceRange.baseArrayLayer = arrayStereo ? uint32_t(eye) : 0;
-        if (impl_->vk.createImageView(device, &view, nullptr,
-                                      &impl_->eyeViews[eye][index]) !=
-            VK_SUCCESS)
-          continue;
-        if(sceneDepthOnly)continue;
-        if(!impl_->depthTarget(eyeExtents[eye],impl_->depthTargets[eye][index])){
-          impl_->say("depth buffer creation failed; hand surface disabled for one eye image");
-          continue;
-        }
-        const std::array<VkImageView,2>attachments{{impl_->eyeViews[eye][index],impl_->depthTargets[eye][index].view}};
-        VkFramebufferCreateInfo framebuffer{
-            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        framebuffer.renderPass = impl_->renderPass;
-        framebuffer.attachmentCount = static_cast<uint32_t>(attachments.size());
-        framebuffer.pAttachments = attachments.data();
-        framebuffer.width = eyeExtents[eye].width;
-        framebuffer.height = eyeExtents[eye].height;
-        framebuffer.layers = 1;
-        impl_->vk.createFramebuffer(device, &framebuffer, nullptr,
-                                    &impl_->framebuffers[eye][index]);
-      }
-    }
-    if(!sceneDepthOnly)for(const auto& eye:impl_->framebuffers){
-      if(eye.empty()||std::any_of(eye.begin(),eye.end(),[](VkFramebuffer framebuffer){return !framebuffer;})){
-        impl_->say("incomplete stereo targets; both hands disabled to avoid one-eye rendering");
-        return false;
-      }
-    }
-    for(const auto& eye:impl_->eyeViews)if(eye.empty()||std::any_of(eye.begin(),eye.end(),[](VkImageView v){return !v;}))return false;
-    const auto available=availability();impl_->initialized=available.leftFist||available.rightFist||available.leftGun||available.rightGun;impl_->say(std::string("renderer ")+(impl_->initialized?"ready":"has no usable assets")+(sceneDepthOnly?"; scene-depth hands, constant environment lighting":"; self-depth overlay hands, constant environment lighting"));impl_->writeCalibrationStatus("Num 0 switches hand; Num 5 resets selected hand");return impl_->initialized;
-}
-
-void HandRenderer::shutdown() {
-  if (!impl_ || !impl_->device)
-    return;
-  if (impl_->queue && impl_->vk.queueWaitIdle)
-    impl_->vk.queueWaitIdle(impl_->queue);
-  for(auto framebuffer:impl_->sceneFramebuffers)
-    if(framebuffer)impl_->vk.destroyFramebuffer(impl_->device,framebuffer,nullptr);
-  for(auto& copy:impl_->sceneDepthCopies)impl_->destroyDepth(copy.target);
-  for(auto&scene:impl_->scenePipelines){
-    if(scene.hudMask)impl_->vk.destroyPipeline(impl_->device,scene.hudMask,nullptr);
-    if(scene.hudPlaceholder)impl_->vk.destroyPipeline(impl_->device,scene.hudPlaceholder,nullptr);
-    if(scene.pipeline)impl_->vk.destroyPipeline(impl_->device,scene.pipeline,nullptr);
-    if(scene.renderPass)impl_->vk.destroyRenderPass(impl_->device,scene.renderPass,nullptr);
-  }
-  for (auto &eye : impl_->framebuffers)
-    for (auto framebuffer : eye)
-      if (framebuffer)
-        impl_->vk.destroyFramebuffer(impl_->device, framebuffer, nullptr);
-  for (auto &eye : impl_->eyeViews)
-    for (auto view : eye)
-      if (view)
-        impl_->vk.destroyImageView(impl_->device, view, nullptr);
-  for(auto&eye:impl_->depthTargets)for(auto&depth:eye){
-    if(depth.view)impl_->vk.destroyImageView(impl_->device,depth.view,nullptr);
-    if(depth.image)impl_->vk.destroyImage(impl_->device,depth.image,nullptr);
-    if(depth.memory)impl_->vk.freeMemory(impl_->device,depth.memory,nullptr);
-  }
-  impl_->destroyAsset(impl_->laserAsset);
-  for (auto &asset : impl_->assets)
-    impl_->destroyAsset(asset);
-  if (impl_->pipeline)
-    impl_->vk.destroyPipeline(impl_->device, impl_->pipeline, nullptr);
-  if(impl_->fragmentShader)
-    impl_->vk.destroyShaderModule(impl_->device,impl_->fragmentShader,nullptr);
-  if(impl_->hudMaskShader)impl_->vk.destroyShaderModule(impl_->device,impl_->hudMaskShader,nullptr);
-  if(impl_->hudPlaceholderShader)impl_->vk.destroyShaderModule(impl_->device,impl_->hudPlaceholderShader,nullptr);
-  if(impl_->vertexShader)
-    impl_->vk.destroyShaderModule(impl_->device,impl_->vertexShader,nullptr);
-  if (impl_->pipelineLayout)
-    impl_->vk.destroyPipelineLayout(impl_->device, impl_->pipelineLayout,
-                                    nullptr);
-  if (impl_->renderPass)
-    impl_->vk.destroyRenderPass(impl_->device, impl_->renderPass, nullptr);
-  if (impl_->descriptorPool)
-    impl_->vk.destroyDescriptorPool(impl_->device, impl_->descriptorPool,
-                                    nullptr);
-  if (impl_->descriptorLayout)
-    impl_->vk.destroyDescriptorSetLayout(impl_->device, impl_->descriptorLayout,
-                                         nullptr);
-  if (impl_->sampler)
-    impl_->vk.destroySampler(impl_->device, impl_->sampler, nullptr);
-  if (impl_->uploadPool)
-    impl_->vk.destroyCommandPool(impl_->device, impl_->uploadPool, nullptr);
-  const auto logger = impl_->log;
-  *impl_ = Impl{};
-  impl_->log = logger;
-  if (logger)
-    logger("[HANDS] renderer resources released");
-}
-
-void HandRenderer::configureCalibration(HandWeaponKind profile,bool leftHanded,bool enabled,const argent::calibration::ApplyCommand& command){
-    auto& p=*impl_;
-    if(p.applyRevision.consume(command.revision)&&command.mode=="hands"){
-        const auto target=command.profile+(command.left?"_left":"_right");
-        argent::calibration::report(p.root,command.revision,p.calibrationDraft.scope==target&&p.saveCalibration(),"hands "+target);
-    }
-    if(p.calibrationWeapon!=profile||p.calibrationLeftHanded!=leftHanded)p.calibrationContextInitialized=false;
-    p.calibrationWeapon=profile;p.calibrationLeftHanded=leftHanded;
-    p.calibrationDraft.select(enabled?std::string(HandWeaponKindKey(profile))+(leftHanded?"_left":"_right"):std::string{});
-}
-
-void HandRenderer::setCalibrationEnabled(bool enabled){
-    if(enabled==(impl_->calibrationMode!=CalibrationMode::None))return;
-    impl_->calibrationMode=enabled?CalibrationMode::Rotation:CalibrationMode::None;
-    impl_->calibrationPlusWasDown=impl_->calibrationHandWasDown=impl_->calibrationResetWasDown=false;
-    impl_->calibrationContextInitialized=false;
-}
-
-HandAssetAvailability HandRenderer::availability()const{return {impl_->assets[0].ready,impl_->assets[1].ready,impl_->assets[2].ready,impl_->assets[3].ready};}
-const HandCalibration&HandRenderer::leftCalibration()const{return impl_->leftCalibration;}
-const HandCalibration&HandRenderer::rightCalibration()const{return impl_->rightCalibration;}
-
-void HandRenderer::record(VkCommandBuffer commandBuffer,std::uint32_t eye,
-    std::uint32_t imageIndex,const HandEyeView&view,const HandPose&leftGrip,
-    const HandPose&rightGrip,const HandVisibilityOutput&visibility,
-    const HandGameplayState&gameplay){
-    if(!impl_->initialized||eye>=2||imageIndex>=impl_->framebuffers[eye].size()||!impl_->framebuffers[eye][imageIndex])return;impl_->pollCalibration(gameplay);const bool drawLeft=visibility.left!=HandModelKind::None&&leftGrip.valid;const bool drawRight=visibility.right!=HandModelKind::None&&rightGrip.valid;if(!drawLeft&&!drawRight)return;
-    const auto&extent=impl_->extents[eye];
-    const int32_t rectX=std::clamp(view.imageRectX,0,int32_t(extent.width));
-    const int32_t rectY=std::clamp(view.imageRectY,0,int32_t(extent.height));
-    const uint32_t requestedWidth=view.imageRectWidth?view.imageRectWidth:extent.width;
-    const uint32_t requestedHeight=view.imageRectHeight?view.imageRectHeight:extent.height;
-    const uint32_t rectWidth=std::min(requestedWidth,extent.width-uint32_t(rectX));
-    const uint32_t rectHeight=std::min(requestedHeight,extent.height-uint32_t(rectY));
-    if(!rectWidth||!rectHeight)return;
-    VkRect2D scissor{{rectX,rectY},{rectWidth,rectHeight}};
-    VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    begin.renderPass = impl_->renderPass;
-    begin.framebuffer = impl_->framebuffers[eye][imageIndex];
-    begin.renderArea = scissor;
-    std::array<VkClearValue,2>clearValues{};clearValues[1].depthStencil={1.f,0};
-    begin.clearValueCount=static_cast<uint32_t>(clearValues.size());
-    begin.pClearValues=clearValues.data();
-    impl_->vk.cmdBeginRenderPass(commandBuffer, &begin,
-                                 VK_SUBPASS_CONTENTS_INLINE);
-    impl_->drawGeometry(commandBuffer,impl_->pipeline,extent,view,leftGrip,
-        rightGrip,visibility,gameplay);
-    impl_->vk.cmdEndRenderPass(commandBuffer);
-}
-
-bool HandRenderer::recordSceneIntegrated(VkCommandBuffer commandBuffer,
-    const HandSceneTarget&target,const HandEyeView&view,
-    const HandPose&leftGrip,const HandPose&rightGrip,
-    const HandVisibilityOutput&visibility,const HandGameplayState&gameplay,const HandPose&laser){
-    if(!impl_->initialized||!target.colorView||!target.depthView
-        ||target.colorFormat==VK_FORMAT_UNDEFINED
-        ||!handSceneDepthFormat(target.depthFormat)
-        ||target.samples!=VK_SAMPLE_COUNT_1_BIT)return false;
-    const bool drawLeft=visibility.left!=HandModelKind::None&&leftGrip.valid;
-    const bool drawRight=visibility.right!=HandModelKind::None&&rightGrip.valid;
-    if(!drawLeft&&!drawRight&&!laser.valid&&view.hudPlaceholder.empty())return false;
-    impl_->pollCalibration(gameplay);
-    auto*scene=impl_->scenePipeline(target);if(!scene)return false;
-    Impl::SceneDepth* privateDepth=nullptr;
-    if(target.copyDepthForHands){
-        const auto slot=impl_->sceneDepthCopiesUsed++;
-        if(slot==impl_->sceneDepthCopies.size())impl_->sceneDepthCopies.emplace_back();
-        privateDepth=&impl_->sceneDepthCopies[slot];
-        if(privateDepth->format!=target.depthFormat||privateDepth->extent.width!=target.extent.width
-            ||privateDepth->extent.height!=target.extent.height){
-            // This slot is reused only after finishSceneIntegratedFrame, which
-            // follows the owner fence and destroys all borrowing framebuffers.
-            impl_->destroyDepth(privateDepth->target);*privateDepth={};
-        }
-        if(!privateDepth->target.view){
-            if(!impl_->depthTarget(target.extent,privateDepth->target,target.depthFormat,true)){
-                impl_->destroyDepth(privateDepth->target);return false;
-            }
-            privateDepth->format=target.depthFormat;privateDepth->extent=target.extent;
-            impl_->say("Native private hand depth ready; scene depth/stencil preserved");
-        }
-    }
-    const std::array<VkImageView,2>attachments{{target.colorView,privateDepth?privateDepth->target.view:target.depthView}};
-    VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    framebufferInfo.renderPass=scene->renderPass;
-    framebufferInfo.attachmentCount=static_cast<std::uint32_t>(attachments.size());
-    framebufferInfo.pAttachments=attachments.data();framebufferInfo.width=target.extent.width;
-    framebufferInfo.height=target.extent.height;framebufferInfo.layers=1;
-    VkFramebuffer framebuffer{};
-    if(impl_->vk.createFramebuffer(impl_->device,&framebufferInfo,nullptr,&framebuffer)!=VK_SUCCESS)
-        return false;
-    impl_->sceneFramebuffers.push_back(framebuffer);
-    if(privateDepth){
-        copyHandSceneDepth(impl_->vk,commandBuffer,target.depthImage,privateDepth->target.image,
-            target.extent,handSceneDepthAspect(target.depthFormat),privateDepth->initialized,target.depthArrayLayer,target.depthExtent,target.depthOffset);
-        privateDepth->initialized=true;
-    }
-    VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    begin.renderPass=scene->renderPass;begin.framebuffer=framebuffer;
-    begin.renderArea={{0,0},target.extent};
-    impl_->vk.cmdBeginRenderPass(commandBuffer,&begin,VK_SUBPASS_CONTENTS_INLINE);
-    impl_->drawGeometry(commandBuffer,scene->pipeline,target.extent,view,leftGrip,
-        rightGrip,visibility,gameplay,laser);
-    impl_->vk.cmdEndRenderPass(commandBuffer);
-    return true;
-}
-
-bool HandRenderer::recordSceneDepth(VkCommandBuffer cb,uint32_t eye,uint32_t index,
-    HandSceneTarget target,const HandEyeView& view,const HandPose& left,const HandPose& right,
-    const HandVisibilityOutput& visibility,const HandGameplayState& gameplay,const HandPose& laser){
-    if(!impl_->initialized||eye>=2||index>=impl_->eyeViews[eye].size())return false;
-    target.depthExtent=target.extent;target.extent=impl_->extents[eye];
-    if(target.depthExtent.width!=target.extent.width||target.depthExtent.height!=target.extent.height){
-        if(!impl_->vk.getPhysicalDeviceFormatProperties)return false;
-        VkFormatProperties properties{};
-        impl_->vk.getPhysicalDeviceFormatProperties(impl_->physical,target.depthFormat,&properties);
-        const auto required=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT;
-        if((properties.optimalTilingFeatures&required)!=required)return false;
-    }
-    target.colorView=impl_->eyeViews[eye][index];target.colorFormat=impl_->format;
-    target.copyDepthForHands=true;target.depthArrayLayer=eye;
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.image=target.depthImage;barrier.oldLayout=target.depthLayout;
-    barrier.newLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-    barrier.subresourceRange={handSceneDepthAspect(target.depthFormat),0,1,eye,1};
-    barrier.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;
-    barrier.dstAccessMask=VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    impl_->vk.cmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-    const bool recorded=recordSceneIntegrated(cb,target,view,left,right,visibility,gameplay,laser);
-    std::swap(barrier.oldLayout,barrier.newLayout);std::swap(barrier.srcAccessMask,barrier.dstAccessMask);
-    impl_->vk.cmdPipelineBarrier(cb,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-    return recorded;
-}
-
-void HandRenderer::finishSceneIntegratedFrame(){
-    if(!impl_->device)return;
-    for(auto framebuffer:impl_->sceneFramebuffers)
-        if(framebuffer)impl_->vk.destroyFramebuffer(impl_->device,framebuffer,nullptr);
-    impl_->sceneFramebuffers.clear();
-    impl_->sceneDepthCopiesUsed=0;
-}
+#include "HandRendererRuntime.inc"
 
 } // namespace kharvox::hands
