@@ -20,19 +20,7 @@ struct ControllerActions {
  std::map<std::string,XrVector3f> supportProfiles;
  ULONGLONG psvr2FireStartedTick{};KharvoxWeaponKind psvr2FireWeapon{KharvoxWeaponKind::Unknown};
  ULONGLONG configRead{};std::string configText;bool captureDown{};
- std::filesystem::path configPath(){wchar_t name[32768]{};auto n=GetEnvironmentVariableW(L"ARGENT_LOG",name,32768);return n&&n<32768?std::filesystem::path(name).parent_path().parent_path()/"assets"/"argent_controls.cfg":std::filesystem::path{};}
- void refreshConfiguration(){
-  if(GetTickCount64()-configRead<1000)return;configRead=GetTickCount64();
-  auto file=configPath();if(file.empty())return;auto supportFile=file;supportFile+=L".support";
-  {std::ifstream saved(supportFile);std::string key;XrVector3f v;while(saved>>key>>v.x>>v.y>>v.z)if(camera::validPosition(v)&&input::length(v)>=.08f&&input::length(v)<=1.2f)supportProfiles[key]=v;}
-  std::ifstream stream(file);if(!stream)return;
-  std::string content((std::istreambuf_iterator<char>(stream)),{});if(content==configText)return;
-  input::WeaponConfig candidate;std::istringstream rows(content);
-  if(input::readWeaponConfig(rows,candidate)){configuration=candidate;support={};mapping={};motionWheel={};wheelClicks={};shoulder={};physicalKill={};handsJump={};handFilters={};presentation::optionBits=(candidate.automaticPresentation?1u:0u)|(candidate.cinematicsQuad?2u:0u)|(candidate.syncImmersive?4u:0u)|(candidate.movementImmersive?8u:0u);log("XR_WEAPON_CONFIG pivotForward="+std::to_string(configuration.weaponPivot.x)+" pivotLeft="+std::to_string(configuration.weaponPivot.y)+" pivotUp="+std::to_string(configuration.weaponPivot.z)+" profile="+configuration.profile+" dominant="+(configuration.leftHanded?"left":"right")+" turn="+(configuration.snapTurn?"snap":"smooth")+" speed="+std::to_string(configuration.smoothSpeed)+" snap="+std::to_string(configuration.snapDegrees)+" physicalKill="+std::to_string(configuration.physicalGloryKill)+" punchSpeed="+std::to_string(configuration.glorySpeed)+" punchHands="+std::to_string(configuration.gloryHands)+" bhaptics="+std::to_string(configuration.bhapticsEnabled)+" psvr2="+std::to_string(configuration.psvr2AdaptiveTriggers));}
-  else log("XR_WEAPON_CONFIG rejected invalid configuration; keeping previous settings");
-  if(configuration.cinematics3d)presentation::optionBits.fetch_or(16u);
-  configText=content;
- }
+#include "XrConfiguration.inc"
 
  KharvoxWeaponKind hapticWeapon() const {
   return player::hapticWeapon();
@@ -85,64 +73,7 @@ struct ControllerActions {
    }else if(command==kharvox::XInputHapticCommand::Stop){XR(xrStopHapticFeedback)(session,&info);kharvox::noteXInputHapticStopAttempted(hapticState[hand]);}
   }
  }
- void destroy(){
-  if(ready){updateHaptics(false);updatePsvr2Triggers(false,false,false);}
-  KharvoxPsvr2SubmitTrigger(kharvox::psvr2::offCommand(configuration.leftHanded,kharvox::psvr2::TriggerOffReason::SessionEnd));
-  KharvoxPsvr2IpcRequestStop();KharvoxBhapticsIpcRequestStop();
-  input::clear();ready=false;heldGrip={};handFilters={};indexMenuHeld=false;syncCount=0;gripProfiles={};
-  for(auto& h:aimSpace)if(h){XR(xrDestroySpace)(h);h=XR_NULL_HANDLE;}
-  for(auto& h:gripSpace)if(h){XR(xrDestroySpace)(h);h=XR_NULL_HANDLE;}
-  if(set){XR(xrDestroyActionSet)(set);set=XR_NULL_HANDLE;}
- }
- XrPath path(const char* text){XrPath p{};check(XR(xrStringToPath)(instance,text,&p),text);return p;}
- void create(){
-  try{
-   hands={path("/user/hand/left"),path("/user/hand/right")};
-   XrActionSetCreateInfo si{XR_TYPE_ACTION_SET_CREATE_INFO};strcpy_s(si.actionSetName,"argent_gameplay");strcpy_s(si.localizedActionSetName,"ARGENT Gameplay");
-   check(XR(xrCreateActionSet)(instance,&si,&set),"create controller actions");
-   auto action=[&](const char* name,XrActionType type,XrAction& out){
-    XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};strcpy_s(ai.actionName,name);strcpy_s(ai.localizedActionName,name);ai.actionType=type;ai.countSubactionPaths=2;ai.subactionPaths=hands.data();
-    check(XR(xrCreateAction)(set,&ai,&out),name);
-   };
-   action("aim",XR_ACTION_TYPE_POSE_INPUT,aim);action("grip",XR_ACTION_TYPE_POSE_INPUT,grip);
-   action("stick",XR_ACTION_TYPE_VECTOR2F_INPUT,stick);action("trigger",XR_ACTION_TYPE_FLOAT_INPUT,trigger);
-   action("squeeze",XR_ACTION_TYPE_FLOAT_INPUT,squeeze);action("lower_button",XR_ACTION_TYPE_BOOLEAN_INPUT,lower);
-   action("upper_button",XR_ACTION_TYPE_BOOLEAN_INPUT,upper);action("stick_click",XR_ACTION_TYPE_BOOLEAN_INPUT,click);
-   action("menu",XR_ACTION_TYPE_BOOLEAN_INPUT,menu);action("haptic",XR_ACTION_TYPE_VIBRATION_OUTPUT,haptic);
-   action("index_pause_force",XR_ACTION_TYPE_FLOAT_INPUT,indexMenu);
-   auto suggest=[&](const char* profile,bool index){
-    std::vector<XrActionSuggestedBinding> bindings;
-    for(int h=0;h<2;++h){
-     const std::string hand=h?"/user/hand/right/input/":"/user/hand/left/input/";
-     auto bind=[&](XrAction a,const char* control){bindings.push_back({a,path((hand+control).c_str())});};
-     bindings.push_back({haptic,path((std::string(h?"/user/hand/right/output/haptic":"/user/hand/left/output/haptic")).c_str())});
-     bind(aim,"aim/pose");bind(grip,"grip/pose");bind(stick,"thumbstick");bind(click,"thumbstick/click");
-     bind(trigger,"trigger/value");bind(squeeze,kharvox::gripInputComponent(index?kharvox::GripControllerProfile::ValveIndex:kharvox::GripControllerProfile::Default));
-     bind(lower,input::faceButtonComponent(index,h,false));bind(upper,input::faceButtonComponent(index,h,true));
-     if(h==0)bind(index?indexMenu:menu,input::pauseComponent(index));
-    }
-    XrInteractionProfileSuggestedBinding info{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};info.interactionProfile=path(profile);info.countSuggestedBindings=uint32_t(bindings.size());info.suggestedBindings=bindings.data();
-    auto result=XR(xrSuggestInteractionProfileBindings)(instance,&info);log(std::string("XR_INPUT_BINDINGS ")+profile+" result="+std::to_string(result));
-   };
-   suggest("/interaction_profiles/oculus/touch_controller",false);
-   suggest("/interaction_profiles/valve/index_controller",true);
-   // Simple controller retains tracking/select/menu even without thumbsticks.
-   std::vector<XrActionSuggestedBinding> simple;
-   for(int h=0;h<2;++h){std::string prefix=h?"/user/hand/right/input/":"/user/hand/left/input/";
-    simple.push_back({haptic,path(h?"/user/hand/right/output/haptic":"/user/hand/left/output/haptic")});
-    simple.push_back({aim,path((prefix+"aim/pose").c_str())});simple.push_back({grip,path((prefix+"grip/pose").c_str())});
-    simple.push_back({lower,path((prefix+"select/click").c_str())});simple.push_back({menu,path((prefix+"menu/click").c_str())});}
-   XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};sb.interactionProfile=path("/interaction_profiles/khr/simple_controller");sb.countSuggestedBindings=uint32_t(simple.size());sb.suggestedBindings=simple.data();XR(xrSuggestInteractionProfileBindings)(instance,&sb);
-   for(int h=0;h<2;++h){XrActionSpaceCreateInfo info{XR_TYPE_ACTION_SPACE_CREATE_INFO};info.subactionPath=hands[h];info.poseInActionSpace.orientation.w=1;
-    info.action=aim;check(XR(xrCreateActionSpace)(session,&info,&aimSpace[h]),"aim space");info.action=grip;check(XR(xrCreateActionSpace)(session,&info,&gripSpace[h]),"grip space");}
-   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};attach.countActionSets=1;attach.actionSets=&set;
-   check(XR(xrAttachSessionActionSets)(session,&attach),"attach controller actions");ready=true;
-   KharvoxBhapticsIpcStart();
-   KharvoxPsvr2IpcStart();
-   log(std::string("XR_INPUT_READY XInputGetState=")+(input::install()?"hooked":"unavailable"));
-   log(std::string("XR_HAPTICS XInputSetState=")+(input::installHaptics()?"hooked":"unavailable"));
-  }catch(const std::exception& e){log(std::string("XR_INPUT_FAILED ")+e.what());destroy();}
- }
+#include "XrActionLifecycle.inc"
  void update(XrTime time,bool focused,bool world){
   if(!ready||!focused){if(ready){updateHaptics(false);updatePsvr2Triggers(false,false,false);}input::clear();heldGrip={};indexMenuHeld=false;syncCount=0;mapping={};motionWheel={};wheelClicks={};support={};shoulder={};physicalKill={};handsJump={};handFilters={};captureDown=false;return;}
   try{
@@ -234,11 +165,7 @@ struct ControllerActions {
     if(capture&&!captureDown&&controls.grip[off]&&sample.gripValid[off]){
      auto v=input::rotate(input::inverse(sample.weapon.orientation),input::sub(sample.grip[off].position,sample.weapon.position));
      if(input::length(v)>=.08f&&input::length(v)<=1.2f){
-      auto saved=configPath();saved+=L".support";auto temporary=saved;temporary+=L".tmp";
-      supportProfiles[activeProfile]=v;
-      std::ofstream out(temporary);for(const auto& row:supportProfiles)out<<row.first<<' '<<row.second.x<<' '<<row.second.y<<' '<<row.second.z<<'\n';
-      out.flush();const bool written=bool(out);out.close();
-      if(written&&MoveFileExW(temporary.c_str(),saved.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)){calibration.support=v;log("XR_TWO_HAND support captured profile="+activeProfile);}else log("XR_TWO_HAND capture save failed");
+      if(input::saveSupportCalibration(configPath(),activeProfile,v,supportProfiles)){calibration.support=v;log("XR_TWO_HAND support captured profile="+activeProfile);}else log("XR_TWO_HAND capture save failed");
      }
     }
     captureDown=capture;
