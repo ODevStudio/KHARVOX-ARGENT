@@ -5,6 +5,8 @@ Base: `de22b367e1a01c5f39fba9f5651724bc2b0a6f29` (`origin/main`). Audit started 
 
 Trace startup and device negotiation, game interception and SFS compilation, frame publication, stereo resource ownership, FSR, hand/depth rendering, XR handoff, desktop mirroring, diagnostics, input/integrations, and teardown. Fix evidence-backed high-value stability or performance issues, retaining required synchronization and validation. Commit substantial fixes separately and record them here after each subsystem.
 
+Published fork reviews and original-commit mapping: [subsystem PR index](PULL_REQUEST_SUBSYSTEM_INDEX.md). These are draft review PRs; the end-to-end audit remains incomplete.
+
 ## Existing Local Commits
 
 | Commit | Subsystem | Category | Change |
