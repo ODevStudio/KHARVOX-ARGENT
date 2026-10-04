@@ -15,13 +15,8 @@ bool HandRenderer::initialize(VkPhysicalDevice physicalDevice,VkDevice device,
     impl_->defaultWeaponCalibrations=impl_->weaponCalibrations;
     impl_->loadCalibrationFile(L"hand_models_calibration_saved.cfg",false);
     impl_->calibrationDraft={};
-    for(const auto* filename:{L"hand_pose_calibration_default.cfg",L"hand_pose_calibration_saved.cfg"}){std::ifstream in(impl_->root/filename);std::string key;HandCalibration value;
-     while(in>>key>>value.position[0]>>value.position[1]>>value.position[2]>>value.rotationDegrees[0]>>value.rotationDegrees[1]>>value.rotationDegrees[2]>>value.scale){
-      bool valid=std::isfinite(value.scale)&&value.scale>0;
-      for(float v:value.position)valid=valid&&std::isfinite(v);
-      for(float v:value.rotationDegrees)valid=valid&&std::isfinite(v);
-      if(valid)impl_->calibrationDraft.saved[key]=value;
-     }}
+    for(const auto* filename:{L"hand_pose_calibration_default.cfg",L"hand_pose_calibration_saved.cfg"})
+        impl_->loadPoseCalibrationFile(filename);
 
     char calibrationMode[24]{};
     if(GetEnvironmentVariableA("ARGENT_HAND_CALIBRATION",calibrationMode,sizeof(calibrationMode))>0){
@@ -301,4 +296,3 @@ void HandRenderer::finishSceneIntegratedFrame(){
     impl_->sceneFramebuffers.clear();
     impl_->sceneDepthCopiesUsed=0;
 }
-

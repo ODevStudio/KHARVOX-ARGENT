@@ -2,6 +2,7 @@
 #include "HandSceneDepthCopy.h"
 #include "HandCalibrationPolicy.h"
 #include "CalibrationDraft.h"
+#include "CalibrationFile.h"
 #include "HandDispatch.h"
 #include "HandSceneFramebuffers.h"
 #include "HandHudMaskSpv.h"
@@ -168,6 +169,7 @@ struct HandRenderer::Impl {
     const HandCalibration& renderCalibration(bool left,HandModelKind kind,
         HandWeaponKind weapon,bool leftHanded)const;
     void loadCalibrationFile(const wchar_t* filename, bool defaults);
+    void loadPoseCalibrationFile(const wchar_t* filename);
     bool saveCalibration();
     void writeCalibrationStatus(const char*message=nullptr)const;
     void pollCalibration(const HandGameplayState&gameplay);
@@ -545,16 +547,7 @@ void HandRenderer::Impl::drawGeometry(VkCommandBuffer commandBuffer,
 
 void HandRenderer::Impl::destroyAsset(Asset&asset){for(auto&texture:asset.textures){if(texture.view)vk.destroyImageView(device,texture.view,nullptr);if(texture.image)vk.destroyImage(device,texture.image,nullptr);if(texture.memory)vk.freeMemory(device,texture.memory,nullptr);}if(asset.indices)vk.destroyBuffer(device,asset.indices,nullptr);if(asset.indexMemory)vk.freeMemory(device,asset.indexMemory,nullptr);if(asset.vertices)vk.destroyBuffer(device,asset.vertices,nullptr);if(asset.vertexMemory)vk.freeMemory(device,asset.vertexMemory,nullptr);asset={};}
 
-const HandCalibration&HandRenderer::Impl::renderCalibration(bool left,
-    HandModelKind kind,HandWeaponKind weapon,bool leftHanded)const{
-    if(auto value=calibrationDraft.find(poseKey(weapon,leftHanded,left)))return *value;
-    if(auto value=calibrationDraft.find(poseKey(HandWeaponKind::Unknown,leftHanded,left)))return *value;
-    const auto selection=selectHandCalibrationProfile(left,leftHanded,weapon,
-        kind==HandModelKind::GunHolding);
-    if(selection.weaponSpecific)
-        return weaponCalibrations[selection.weaponIndex][selection.handIndex];
-    return left?leftCalibration:rightCalibration;
-}
+#include "HandPoseCalibration.inc"
 
 HandCalibration&HandRenderer::Impl::selectedCalibration(){
     const auto initial=renderCalibration(calibrateLeft,HandModelKind::GunHolding,calibrationWeapon,calibrationLeftHanded);
