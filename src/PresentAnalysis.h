@@ -35,16 +35,18 @@ struct PresentAnalysis {
    h.previousFovPhase=fovPhase;h.previousFov=fov;
    if(!h.reportAt){h.reportAt=exit;h.cpuAt=exit;h.processCpu=cpu(true);h.threadCpu=cpu(false);h.thread=GetCurrentThreadId();}
    if(h.count&&(exit-h.reportAt>=1000000||h.count==h.records.size())){
+    const auto count=h.count;h.count=0;h.reportAt=exit;
     std::array<uint64_t,256> sorted{};uint64_t sum{},maxPresent{},sumOutside{},sumPresent{};unsigned over25{},over50{};
-    for(size_t i=0;i<h.count;++i){const auto& r=h.records[i];sorted[i]=r.interval;sum+=r.interval;sumPresent+=r.present;sumOutside+=r.outside;maxPresent=std::max(maxPresent,r.present);over25+=r.interval>25000;over50+=r.interval>50000;}
-    std::sort(sorted.begin(),sorted.begin()+h.count);
-    const auto percentile=[&](size_t p){return sorted[std::min(h.count-1,(h.count*p+99)/100-1)]/1000.;};
-    std::ostringstream out;out<<"FRAME_TIMELINE frames="<<h.count<<" endFrame="<<h.frame<<" clock=steady_us meanMs="<<double(sum)/h.count/1000.<<" p50Ms="<<percentile(50)<<" p95Ms="<<percentile(95)<<" p99Ms="<<percentile(99)<<" maxMs="<<sorted[h.count-1]/1000.<<" presentMeanMs="<<double(sumPresent)/h.count/1000.<<" presentMaxMs="<<maxPresent/1000.<<" outsidePresentMeanMs="<<double(sumOutside)/h.count/1000.<<" over25="<<over25<<" over50="<<over50<<" recordsUs=";
-    for(size_t i=0;i<h.count;++i){if(i)out<<',';const auto& r=h.records[i];out<<r.interval<<'/'<<r.present<<'/'<<r.outside<<'/'<<(r.world?'G':'Q');}out<<" entriesUs=";for(size_t i=0;i<h.count;++i){if(i)out<<',';out<<h.records[i].entry;}if(perf::enabled()){out<<" perfModes=";for(size_t i=0;i<h.count;++i){if(i)out<<',';out<<h.records[i].mode;}}batch=out.str();
-    if(perf::enabled()){std::ostringstream f;f<<" fovStates=";for(size_t i=0;i<h.count;++i){if(i)f<<',';f<<h.records[i].fovPhase<<'/'<<h.records[i].fov;}batch+=f.str();}
+    for(size_t i=0;i<count;++i){const auto& r=h.records[i];sorted[i]=r.interval;sum+=r.interval;sumPresent+=r.present;sumOutside+=r.outside;maxPresent=std::max(maxPresent,r.present);over25+=r.interval>25000;over50+=r.interval>50000;}
+    std::sort(sorted.begin(),sorted.begin()+count);
+    const auto percentile=[&](size_t p){return sorted[std::min(count-1,(count*p+99)/100-1)]/1000.;};
+    std::ostringstream out;out<<"FRAME_TIMELINE frames="<<count<<" endFrame="<<h.frame<<" clock=steady_us meanMs="<<double(sum)/count/1000.<<" p50Ms="<<percentile(50)<<" p95Ms="<<percentile(95)<<" p99Ms="<<percentile(99)<<" maxMs="<<sorted[count-1]/1000.<<" presentMeanMs="<<double(sumPresent)/count/1000.<<" presentMaxMs="<<maxPresent/1000.<<" outsidePresentMeanMs="<<double(sumOutside)/count/1000.<<" over25="<<over25<<" over50="<<over50<<" recordsUs=";
+    for(size_t i=0;i<count;++i){if(i)out<<',';const auto& r=h.records[i];out<<r.interval<<'/'<<r.present<<'/'<<r.outside<<'/'<<(r.world?'G':'Q');}out<<" entriesUs=";for(size_t i=0;i<count;++i){if(i)out<<',';out<<h.records[i].entry;}if(perf::enabled()){out<<" perfModes=";for(size_t i=0;i<count;++i){if(i)out<<',';out<<h.records[i].mode;}}
+    if(!out)return;batch=out.str();
+    if(perf::enabled()){std::ostringstream f;f<<" fovStates=";for(size_t i=0;i<count;++i){if(i)f<<',';f<<h.records[i].fovPhase<<'/'<<h.records[i].fov;}if(!f)return;batch+=f.str();}
     const auto process=cpu(true),thread=cpu(false);const auto elapsed=exit-h.cpuAt;
-    std::ostringstream usage;usage<<"PROCESS_CPU windowMs="<<elapsed/1000.<<" processCoreEquivalents="<<(elapsed&&process>=h.processCpu?double(process-h.processCpu)/elapsed:0.)<<" presentThread="<<GetCurrentThreadId()<<" presentThreadCoreEquivalents="<<(h.thread==GetCurrentThreadId()&&elapsed&&thread>=h.threadCpu?double(thread-h.threadCpu)/elapsed:-1.);load=usage.str();
-    h.cpuAt=exit;h.processCpu=process;h.threadCpu=thread;h.thread=GetCurrentThreadId();h.count=0;h.reportAt=exit;
+    std::ostringstream usage;usage<<"PROCESS_CPU windowMs="<<elapsed/1000.<<" processCoreEquivalents="<<(elapsed&&process>=h.processCpu?double(process-h.processCpu)/elapsed:0.)<<" presentThread="<<GetCurrentThreadId()<<" presentThreadCoreEquivalents="<<(h.thread==GetCurrentThreadId()&&elapsed&&thread>=h.threadCpu?double(thread-h.threadCpu)/elapsed:-1.);if(!usage)return;load=usage.str();
+    h.cpuAt=exit;h.processCpu=process;h.threadCpu=thread;h.thread=GetCurrentThreadId();
    }
   }
   if(!batch.empty()){log(batch);log(load);}
