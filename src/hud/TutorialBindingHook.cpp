@@ -34,7 +34,7 @@ const char* __fastcall localizedText(const void* id) {
   auto replaced=replaceTutorialBindings(source,{bool(mode&1),bool(mode&2),bool(mode&4),bool(mode&8)});
   if(replaced==source||replaced.size()>=8192||strings.size()>=4096)return original;
   const auto inserted=strings.emplace(std::string(source),std::move(replaced));
-  log("ETERNAL_TUTORIAL_BINDING layout="+std::to_string(mode)+" strings="+std::to_string(strings.size()));
+  try{log("ETERNAL_TUTORIAL_BINDING layout="+std::to_string(mode)+" strings="+std::to_string(strings.size()));}catch(...){}
   return inserted.first->second.c_str();
  }catch(...){return original;}
 }
@@ -53,10 +53,10 @@ bool installTutorialBindings(unsigned char* base) noexcept {
   constexpr unsigned char steam[]={0x48,0x83,0xec,0x58,0x48,0x8b,0x15,0x0d,0x10,0xf1,0x03,0x48,0x8d,0x05,0x26,0xc7,0x6e,0x02};
   constexpr unsigned char store[]={0x48,0x83,0xec,0x58,0x48,0x8b,0x15,0x7d,0x84,0xfc,0x03,0x48,0x8d,0x05,0x16,0xb5,0x78,0x02};
   auto target=base?base+build::rva(0x360bb0):nullptr;
-  if(!target||std::memcmp(target,build::microsoftStore?store:steam,sizeof(steam))){log("ETERNAL_TUTORIAL_BINDING refused: lookup signature mismatch");return false;}
+  if(!target||std::memcmp(target,build::microsoftStore?store:steam,sizeof(steam))){try{log("ETERNAL_TUTORIAL_BINDING refused: lookup signature mismatch");}catch(...){}return false;}
   bool ok=MH_CreateHook(target,reinterpret_cast<void*>(&localizedText),reinterpret_cast<void**>(&originalLookup))==MH_OK;
   if(ok){ok=MH_EnableHook(target)==MH_OK;if(!ok)MH_RemoveHook(target);}
-  log(std::string("ETERNAL_TUTORIAL_BINDING installed=")+(ok?"1":"0"));return ok;
- }catch(...){log("ETERNAL_TUTORIAL_BINDING install failed");return false;}
+  try{log(std::string("ETERNAL_TUTORIAL_BINDING installed=")+(ok?"1":"0"));}catch(...){}return ok;
+ }catch(...){try{log("ETERNAL_TUTORIAL_BINDING install failed");}catch(...){}return false;}
 }
 }
