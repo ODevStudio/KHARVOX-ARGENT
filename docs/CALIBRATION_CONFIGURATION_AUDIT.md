@@ -11,6 +11,7 @@ Reviewed 2026-10-04. All changes remain local; no game installation was changed.
 | `80c79ef` | Hand calibration save completion | Stability | Check final stream state after close before replacing the file or publishing the draft. |
 | `bd22fd1` | Launcher INI persistence verification | Stability | Verify native zero-return flush semantics, disk contents and snapshot replacement; no runtime change. |
 | `61b8021` | Launcher controls snapshot persistence | Stability | Read a complete native snapshot before formatting/replacement; reject failed streams and preserve normal CRLF output. |
+| `4b99ee3` | Hand-pose calibration loading | Stability | Accept commented authored defaults and publish only complete, validated row overlays; preserve the prior map and preview on failure. |
 
 ## Configuration Publication
 
@@ -167,6 +168,31 @@ transaction. Concurrent launcher processes, replacement between the read and
 write, actual disk faults and host-allocation faults remain unverified. This is a
 save-request stability fix, not an average-FPS optimization.
 
+## Hand-Pose Calibration Loading
+
+The checked-in hand-pose default starts with comments. The old token-stream
+parser stopped at its first `#`, silently ignoring the authored left-handed
+calibration. Parsing also changed the live map before knowing that the whole
+file was valid. The original extracted loader fails eleven of twenty checks.
+
+`readCalibrationFile` reuses the checked native reader and builds a candidate
+overlay before publication. Blank lines, leading/inline comments, CRLF and
+complete final rows without a newline are accepted. Malformed rows, unexpected
+suffixes, nonfinite positions/rotations and nonpositive/nonfinite scales reject
+the whole file. Empty/comment-only files preserve the overlay; duplicate keys
+remain last-wins and complete unknown profiles remain accepted. No speculative
+pose tuning limits are introduced. Optional read/parse failures are contained.
+
+All 22 final production load/resolution cases pass, including the shipped asset,
+handedness isolation, malformed suffixes, an active writer, retry, preview/scope
+preservation and shared decoder/row failure containment. The native read-fault
+hook exercises the fixed reader, not the original CRT `ifstream`; it is not a
+reproduced original injected disk fault. Seven focused hand/GPU/calibration
+checks pass in 19.99 seconds before the final row-error guard. After that guard,
+affected targets rebuild and the 22-case check passes in 0.07 seconds. Full-suite
+verification after this commit remains pending. This adds no per-frame I/O or
+claimed average-FPS gain. Weapon, model and legacy load boundaries remain open.
+
 ## Verification Limits
 
 All eleven configuration boundaries, six support persistence, twenty reload and
@@ -187,7 +213,7 @@ real temporary files, with controlled native read faults and optional logging.
 It does not include the complete controller action update or execute a native
 OpenXR session. Remaining action polling and other diagnostic boundaries still
 need verification.
-Hand/model calibration load validation, full hand polling, launcher legacy-load
+Weapon/model/legacy calibration load validation, full hand polling, launcher legacy-load
 and broader save/apply completion remain pending. Native game/headset,
 package and combined gameplay FPS validation remain unverified; no audit
 completion or FPS improvement is claimed for these persistence changes.
