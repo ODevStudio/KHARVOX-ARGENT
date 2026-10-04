@@ -7,6 +7,16 @@
 #include <string>
 #include <utility>
 namespace argent::input {
+inline bool readSupportCalibration(std::istream& input,std::map<std::string,XrVector3f>& output){
+ if(!input.good())return false;
+ std::map<std::string,XrVector3f> candidate;std::string key;XrVector3f value{};
+ while(input>>key){
+  if(!(input>>value.x>>value.y>>value.z)||!camera::validPosition(value)||length(value)<.08f||length(value)>1.2f)return false;
+  candidate[key]=value;
+ }
+ if(input.bad()||!input.eof())return false;
+ output=std::move(candidate);return true;
+}
 inline bool saveSupportCalibration(const std::filesystem::path& config,const std::string& profile,const XrVector3f& value,std::map<std::string,XrVector3f>& profiles){
  if(config.empty())return false;
  auto saved=config;saved+=L".support";auto temporary=saved;temporary+=L".tmp";

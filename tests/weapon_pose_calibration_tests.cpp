@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <iostream>
 void check(bool v,const char* why){if(!v)throw std::runtime_error(why);}
+#include "xr_configuration_fixture.h"
 class FailedConfigurationBuffer : public std::streambuf {
  std::string text;
 public:
@@ -93,6 +94,7 @@ int main(){try{
  }
  const auto root=std::filesystem::temp_directory_path()/("ArgentWeaponCalibration-"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64()));std::filesystem::create_directories(root);
  checkSupportPersistence(root);
+ xr_configuration_fixture::run(root);
  WeaponPoseCalibration editor;editor.load(root);
  {
   const auto folder=root/L"defaults";std::filesystem::create_directories(folder);

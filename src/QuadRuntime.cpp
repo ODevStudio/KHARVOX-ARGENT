@@ -36,6 +36,7 @@
 #include "openxr/GameplayMapping.h"
 #include "openxr/WeaponConfig.h"
 #include "openxr/SupportCalibration.h"
+#include "openxr/ConfigurationFile.h"
 #include "openxr/HandSmoothing.h"
 #include "openxr/ShoulderChainsaw.h"
 #include "openxr/HapticBridge.h"

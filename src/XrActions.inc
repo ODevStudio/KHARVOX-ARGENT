@@ -20,19 +20,7 @@ struct ControllerActions {
  std::map<std::string,XrVector3f> supportProfiles;
  ULONGLONG psvr2FireStartedTick{};KharvoxWeaponKind psvr2FireWeapon{KharvoxWeaponKind::Unknown};
  ULONGLONG configRead{};std::string configText;bool captureDown{};
- std::filesystem::path configPath(){wchar_t name[32768]{};auto n=GetEnvironmentVariableW(L"ARGENT_LOG",name,32768);return n&&n<32768?std::filesystem::path(name).parent_path().parent_path()/"assets"/"argent_controls.cfg":std::filesystem::path{};}
- void refreshConfiguration(){
-  if(GetTickCount64()-configRead<1000)return;configRead=GetTickCount64();
-  auto file=configPath();if(file.empty())return;auto supportFile=file;supportFile+=L".support";
-  {std::ifstream saved(supportFile);std::string key;XrVector3f v;while(saved>>key>>v.x>>v.y>>v.z)if(camera::validPosition(v)&&input::length(v)>=.08f&&input::length(v)<=1.2f)supportProfiles[key]=v;}
-  std::ifstream stream(file);if(!stream)return;
-  std::string content((std::istreambuf_iterator<char>(stream)),{});if(content==configText)return;
-  input::WeaponConfig candidate;std::istringstream rows(content);
-  if(input::readWeaponConfig(rows,candidate)){configuration=candidate;support={};mapping={};motionWheel={};wheelClicks={};shoulder={};physicalKill={};handsJump={};handFilters={};presentation::optionBits=(candidate.automaticPresentation?1u:0u)|(candidate.cinematicsQuad?2u:0u)|(candidate.syncImmersive?4u:0u)|(candidate.movementImmersive?8u:0u);log("XR_WEAPON_CONFIG pivotForward="+std::to_string(configuration.weaponPivot.x)+" pivotLeft="+std::to_string(configuration.weaponPivot.y)+" pivotUp="+std::to_string(configuration.weaponPivot.z)+" profile="+configuration.profile+" dominant="+(configuration.leftHanded?"left":"right")+" turn="+(configuration.snapTurn?"snap":"smooth")+" speed="+std::to_string(configuration.smoothSpeed)+" snap="+std::to_string(configuration.snapDegrees)+" physicalKill="+std::to_string(configuration.physicalGloryKill)+" punchSpeed="+std::to_string(configuration.glorySpeed)+" punchHands="+std::to_string(configuration.gloryHands)+" bhaptics="+std::to_string(configuration.bhapticsEnabled)+" psvr2="+std::to_string(configuration.psvr2AdaptiveTriggers));}
-  else log("XR_WEAPON_CONFIG rejected invalid configuration; keeping previous settings");
-  if(configuration.cinematics3d)presentation::optionBits.fetch_or(16u);
-  configText=content;
- }
+#include "XrConfiguration.inc"
 
  KharvoxWeaponKind hapticWeapon() const {
   return player::hapticWeapon();
